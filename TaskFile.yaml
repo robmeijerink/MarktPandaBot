@@ -1,0 +1,51 @@
+version: "3"
+
+includes:
+  local:
+    taskfile: Taskfile.local.yml
+    optional: true
+
+tasks:
+  # ==========================================
+  # 💻 SYSTEM
+  # ==========================================
+  default:
+    desc: Open search window task
+    silent: true
+    cmds:
+      - task: search
+
+  search:
+    desc: Open search window
+    silent: true
+    cmds:
+      - |
+        CHOICE=$(task --list | grep '^\*' | grep -vE 'default|search' | fzf --reverse --border="rounded" --prompt="🚀 Search Task: " --pointer="👉")
+        if [ -n "$CHOICE" ]; then
+          TASK_NAME=$(echo "$CHOICE" | awk '{print $2}' | sed 's/:$//')
+          echo -e "\033[1;32mRunning:\033[0m task $TASK_NAME\n"
+          task "$TASK_NAME"
+        fi
+
+  # ==========================================
+  # 🚀 MAIN
+  # ==========================================
+  build:
+    desc: Compile bot to binary
+    cmds:
+      - |
+        echo "Building Go 1.26 binary (Static) via Alpine..."
+        docker run --rm -v "{{.USER_WORKING_DIR}}:/app" -w /app -e CGO_ENABLED=0 golang:1.26-alpine go build -o marktpanda_bot main.go
+        echo "Build complete: marktpanda_bot"
+
+  run:
+    desc: Run the bot interactively in Docker (for local testing)
+    cmds:
+      - |
+        echo "Running main.go directly in Docker..."
+        docker run -it --rm --env-file .env -v "{{.USER_WORKING_DIR}}:/app" -w /app golang:1.26-alpine go run main.go
+
+  clean:
+    desc: Remove compiled binary
+    cmds:
+      - rm -f marktpanda_bot

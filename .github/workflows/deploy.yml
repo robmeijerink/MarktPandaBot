@@ -1,0 +1,53 @@
+name: Deploy MarktPandaBot
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build Static Binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o marktpanda_bot main.go
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Copy Binary to Server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.GCE_TAILSCALE_IP }}
+          username: ${{ secrets.GCE_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "marktpanda_bot"
+          target: "/tmp/"
+
+      - name: Finalize Deployment and Restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCE_TAILSCALE_IP }}
+          username: ${{ secrets.GCE_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            sudo mkdir -p /etc/marktpandabot
+            echo "${{ secrets.ENV_FILE }}" | sudo tee /etc/marktpandabot/.env > /dev/null
+            sudo chown $USER:$USER /etc/marktpandabot/.env
+            # Set to Read-Only for owner, no access for anyone else
+            sudo chmod 400 /etc/marktpandabot/.env
+
+            sudo mv /tmp/marktpanda_bot /usr/local/bin/marktpanda_bot
+            sudo chmod 500 /usr/local/bin/marktpanda_bot
+
+            sudo systemctl restart marktpandabot
