@@ -22,7 +22,7 @@ jobs:
         run: go mod download
 
       - name: Run Tests
-        run: go test -v ./...
+        run: go test -v -race ./...
 
   deploy:
     environment: production
@@ -41,15 +41,17 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o marktpanda_bot main.go
 
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v2
+        uses: tailscale/github-action@v4
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
 
       - name: Copy Binary to Server
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.GCE_TAILSCALE_IP }}
-          username: ${{ secrets.GCE_USER }}
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "marktpanda_bot"
           target: "/tmp/"
@@ -57,17 +59,19 @@ jobs:
       - name: Finalize Deployment and Restart
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.GCE_TAILSCALE_IP }}
-          username: ${{ secrets.GCE_USER }}
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            sudo mkdir -p /etc/marktpandabot
-            echo "${{ secrets.ENV_FILE }}" | sudo tee /etc/marktpandabot/.env > /dev/null
-            sudo chown $USER:$USER /etc/marktpandabot/.env
-            # Set to Read-Only for owner, no access for anyone else
-            sudo chmod 400 /etc/marktpandabot/.env
+            sudo mkdir -p /opt/marktpandabot
+            sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} /opt/marktpandabot
 
-            sudo mv /tmp/marktpanda_bot /usr/local/bin/marktpanda_bot
-            sudo chmod 500 /usr/local/bin/marktpanda_bot
+            echo "${{ secrets.ENV_FILE }}" | sudo tee /opt/marktpandabot/.env > /dev/null
+            sudo chmod 400 /opt/marktpandabot/.env
+
+            sudo mv /tmp/marktpanda_bot /opt/marktpandabot/marktpanda_bot
+            sudo chmod 500 /opt/marktpandabot/marktpanda_bot
+
+            sudo chown ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} /opt/marktpandabot/marktpanda_bot
 
             sudo systemctl restart marktpandabot

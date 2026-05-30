@@ -15,6 +15,7 @@ Join the public Telegram channel to instantly receive:
 
 🔗 **[Join the official MarktPanda Channel](https://t.me/marktpanda)**
 
+
 ## 🎯 What it is
 
 The Liquidation Confluence Tracker is an automated, concurrent market monitor written in Go. It watches for massive liquidation events in the crypto futures market (specifically BTC/USDT). Instead of forwarding raw data, it groups liquidations into 5-minute time windows and evaluates them against strict volume thresholds.
