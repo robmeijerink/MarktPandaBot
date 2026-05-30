@@ -4,6 +4,17 @@ A stateful BTCUSDT Telegram alert system designed to detect genuine Support/Resi
 
 Most liquidation bots spam your feed with every single forced order, leading to severe alert fatigue. This tracker solves that by acting as a high-pass filter: it aggregates live market data across multiple WebSockets and only notifies you when a significant, multi-exchange market shift occurs, complete with the underlying market context.
 
+## 📡 Live Telegram Channel
+
+Don't want to deal with Go environments, CI/CD pipelines, or API limits? You can use the MarktPanda Bot live for FREE.
+
+Join the public Telegram channel to instantly receive:
+- Real-time combined Binance & Bybit liquidation alerts
+- Clear visual breakdowns of Long vs. Short liquidations
+- Market funding rates & Open Interest metrics
+
+🔗 **[Join the official MarktPanda Channel](https://t.me/marktpanda)**
+
 ## 🎯 What it is
 
 The Liquidation Confluence Tracker is an automated, concurrent market monitor written in Go. It watches for massive liquidation events in the crypto futures market (specifically BTC/USDT). Instead of forwarding raw data, it groups liquidations into 5-minute time windows and evaluates them against strict volume thresholds.
@@ -51,8 +62,6 @@ Ord: 22
 Rng: 74010 - 74145
 Fund: 0.0100%
 OI: 85000000
-```
-```
 ```
 
 ## 🚀 Setup & Configuration
