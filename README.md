@@ -34,21 +34,25 @@ The core of this tracker is built on a **Stateful Confluence Strategy** (Global 
 
 ## 📱 Alert Format Example
 
-```text
-🚨 *CONFLUENCE*
+```markdown
+🚨 **LIQUIDATION ALERT**
+_⚠️ Combined (Binance & Bybit): ~509800 $ liquidated in the past 5 minutes._
 
-🌐 *BINANCE*
-Vol: 6.50 ₿
-Ord: 14
-Rng: 64100 - 64850
+🌐 **BINANCE** (Total: 5.20 ₿ / ~384800 $)
+🔴 Longs: 4.00 ₿ (~296000 $)
+🟢 Shorts: 1.20 ₿ (~88800 $)
+Ord: 18
+Rng: 74000 - 74150
 Fund: 0.0100%
 
-📍 *BYBIT*
-Vol: 125000 $
+📍 **BYBIT** (Total: 125000 $)
+🔴 Longs: 100000 🟢 Shorts: 25000
 Ord: 22
-Rng: 64110 - 64845
+Rng: 74010 - 74145
 Fund: 0.0100%
 OI: 85000000
+```
+```
 ```
 
 ## 🚀 Setup & Configuration

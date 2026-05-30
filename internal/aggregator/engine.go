@@ -59,14 +59,33 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 			continue
 		}
 
-		var binanceVol, bybitVolUSDT float64
+		var binanceVol, binanceVolUSDT float64
+		var binanceLongVol, binanceLongVolUSDT float64
+		var binanceShortVol, binanceShortVolUSDT float64
+
+		var bybitVolUSDT, bybitLongVolUSDT, bybitShortVolUSDT float64
+
 		var binanceMin, binanceMax float64
 		var bybitMin, bybitMax float64
 		binanceCount, bybitCount := 0, 0
 
 		for _, item := range data {
+			isLongLiq := item.Side == "SELL" || item.Side == "Sell"
+			isShortLiq := item.Side == "BUY" || item.Side == "Buy"
+
 			if item.Exchange == "binance" {
+				tradeValueUSDT := item.Qty * item.Price
 				binanceVol += item.Qty
+				binanceVolUSDT += tradeValueUSDT
+
+				if isLongLiq {
+					binanceLongVol += item.Qty
+					binanceLongVolUSDT += tradeValueUSDT
+				} else if isShortLiq {
+					binanceShortVol += item.Qty
+					binanceShortVolUSDT += tradeValueUSDT
+				}
+
 				if binanceCount == 0 || item.Price < binanceMin {
 					binanceMin = item.Price
 				}
@@ -76,6 +95,12 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 				binanceCount++
 			} else if item.Exchange == "bybit" {
 				bybitVolUSDT += item.Qty
+				if isLongLiq {
+					bybitLongVolUSDT += item.Qty
+				} else if isShortLiq {
+					bybitShortVolUSDT += item.Qty
+				}
+
 				if bybitCount == 0 || item.Price < bybitMin {
 					bybitMin = item.Price
 				}
@@ -90,28 +115,33 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 		isLocalConfirmed := bybitVolUSDT >= BybitConfirmVolumeUSDT
 
 		if isGlobalTrigger && isLocalConfirmed {
-			// Safely read background context
 			state.Mu.RLock()
 			currentBinanceFunding := state.BinanceFunding
 			currentBybitFunding := state.BybitFunding
 			currentBybitOI := state.BybitOI
 			state.Mu.RUnlock()
 
+			totalImpactUSDT := binanceVolUSDT + bybitVolUSDT
+
 			msg := fmt.Sprintf(
-				"🚨 *CONFLUENCE*\n\n"+
-					"🌐 *BINANCE*\n"+
-					"Vol: %.2f ₿\n"+
+				"🚨 *LIQUIDATION ALERT*\n"+
+					"_⚠️ Combined (Binance & Bybit): ~%.0f $ liquidated in the past 5 minutes._\n\n"+
+					"🌐 *BINANCE* (Total: %.2f ₿ / ~%.0f $)\n"+
+					"🔴 Longs: %.2f ₿ (~%.0f $)\n"+
+					"🟢 Shorts: %.2f ₿ (~%.0f $)\n"+
 					"Ord: %d\n"+
 					"Rng: %.0f - %.0f\n"+
 					"Fund: %.4f%%\n\n"+
-					"📍 *BYBIT*\n"+
-					"Vol: %.0f $\n"+
+					"📍 *BYBIT* (Total: %.0f $)\n"+
+					"🔴 Longs: %.0f $\n"+
+					"🟢 Shorts: %.0f $\n"+
 					"Ord: %d\n"+
 					"Rng: %.0f - %.0f\n"+
 					"Fund: %.4f%%\n"+
 					"OI: %.0f",
-				binanceVol, binanceCount, binanceMin, binanceMax, (currentBinanceFunding * 100),
-				bybitVolUSDT, bybitCount, bybitMin, bybitMax, (currentBybitFunding * 100), currentBybitOI,
+				totalImpactUSDT,                                                                                                                                                           // Intro
+				binanceVol, binanceVolUSDT, binanceLongVol, binanceLongVolUSDT, binanceShortVol, binanceShortVolUSDT, binanceCount, binanceMin, binanceMax, (currentBinanceFunding * 100), // Binance
+				bybitVolUSDT, bybitLongVolUSDT, bybitShortVolUSDT, bybitCount, bybitMin, bybitMax, (currentBybitFunding * 100), currentBybitOI, // Bybit
 			)
 
 			telegram.DispatchTelegramAlert(token, chatID, msg)
