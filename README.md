@@ -78,7 +78,7 @@ OI: 85000000
 
 To run this tracker, you must provide the following environment variables:
 
-- `TELEGRAM_TOKEN`: The API token provided by the BotFather.
+- `TELEGRAM_BOT_TOKEN`: The API token provided by the BotFather.
 
 - `TELEGRAM_CHAT_ID`: The ID of your public or private channel (always starts with `-100`).
 

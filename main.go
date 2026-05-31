@@ -15,7 +15,7 @@ const (
 )
 
 func main() {
-	telegramToken := os.Getenv("TELEGRAM_TOKEN")
+	telegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
 
 	if telegramToken == "" || chatID == "" {
