@@ -2,6 +2,7 @@ package aggregator
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -53,11 +54,17 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 	ticker := time.NewTicker(EvaluationInterval)
 	defer ticker.Stop()
 
+	log.Printf("[ENGINE] Confluence engine started. Evaluating every %s "+
+		"(triggers: Binance >= %.2f ₿ AND Bybit >= %.0f $)",
+		EvaluationInterval, BinanceTriggerVolumeBTC, BybitConfirmVolumeUSDT)
+
 	for range ticker.C {
 		data := aggregator.ExtractAndClear()
 		if len(data) == 0 {
+			log.Println("[ENGINE] Evaluation cycle: 0 liquidation events. Idle.")
 			continue
 		}
+		log.Printf("[ENGINE] Evaluation cycle: %d liquidation events. Aggregating...", len(data))
 
 		var binanceVol, binanceVolUSDT float64
 		var binanceLongVol, binanceLongVolUSDT float64
@@ -114,7 +121,29 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 		isGlobalTrigger := binanceVol >= BinanceTriggerVolumeBTC
 		isLocalConfirmed := bybitVolUSDT >= BybitConfirmVolumeUSDT
 
+		log.Printf("[ENGINE] Breakdown -> Binance: %d ord, %.2f ₿ (~%.0f $) | "+
+			"Bybit: %d ord, %.0f $",
+			binanceCount, binanceVol, binanceVolUSDT, bybitCount, bybitVolUSDT)
+		log.Printf("[ENGINE] Trigger check -> globalTrigger(Binance>=%.2f₿)=%t | "+
+			"localConfirmed(Bybit>=%.0f$)=%t",
+			BinanceTriggerVolumeBTC, isGlobalTrigger, BybitConfirmVolumeUSDT, isLocalConfirmed)
+
+		// Diagnostic: alerts require BOTH legs. Warn loudly when one leg has
+		// volume but the other is silent, so a broken feed is visible.
+		if binanceCount > 0 && bybitCount == 0 {
+			log.Println("[ENGINE] WARNING: Binance has liquidations but Bybit feed is EMPTY " +
+				"this cycle. Bybit confirmation impossible — check the Bybit stream.")
+		} else if bybitCount > 0 && binanceCount == 0 {
+			log.Println("[ENGINE] WARNING: Bybit has liquidations but Binance feed is EMPTY " +
+				"this cycle. Check the Binance stream.")
+		}
+
+		if !isGlobalTrigger || !isLocalConfirmed {
+			log.Println("[ENGINE] No alert: confluence thresholds not met (both legs required).")
+		}
+
 		if isGlobalTrigger && isLocalConfirmed {
+			log.Println("[ENGINE] ALERT TRIGGERED: both thresholds met. Building message...")
 			state.Mu.RLock()
 			currentBinanceFunding := state.BinanceFunding
 			currentBybitFunding := state.BybitFunding
@@ -144,6 +173,7 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 				bybitVolUSDT, bybitLongVolUSDT, bybitShortVolUSDT, bybitCount, bybitMin, bybitMax, (currentBybitFunding * 100), currentBybitOI, // Bybit
 			)
 
+			log.Printf("[ENGINE] Dispatching Telegram alert (combined impact ~%.0f $)...", totalImpactUSDT)
 			telegram.DispatchTelegramAlert(token, chatID, msg)
 		}
 	}

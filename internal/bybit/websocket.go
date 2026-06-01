@@ -37,9 +37,10 @@ type BybitTicker struct {
 func MaintainBybitLiquidations(aggr *aggregator.Aggregator) {
 	wsURL := "wss://stream.bybit.com/v5/public/linear"
 	for {
+		log.Printf("[BYBIT] Connecting to Liquidation stream: %s", wsURL)
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
-			log.Printf("Bybit Liquidation Dial Error: %v. Reconnecting in 5s...", err)
+			log.Printf("[BYBIT] Liquidation dial error: %v. Reconnecting in 5s...", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -48,13 +49,15 @@ func MaintainBybitLiquidations(aggr *aggregator.Aggregator) {
 			"args": []string{"allLiquidation.BTCUSDT"},
 		}
 		if err := conn.WriteJSON(subMsg); err != nil {
-			log.Printf("Bybit Liquidation subscribe error: %v", err)
+			log.Printf("[BYBIT] Liquidation subscribe error: %v. Reconnecting in 5s...", err)
 			conn.Close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		log.Println("[BYBIT] Liquidation stream connected. Subscribed to allLiquidation.BTCUSDT.")
 		listenBybitLiquidations(conn, aggr)
 		conn.Close()
+		log.Println("[BYBIT] Liquidation stream disconnected. Reconnecting in 5s...")
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -80,6 +83,9 @@ func listenBybitLiquidations(conn *websocket.Conn, aggr *aggregator.Aggregator) 
 				size, _ := strconv.ParseFloat(d.Size, 64)
 
 				volumeUSDT := size * price
+
+				log.Printf("[BYBIT] Liquidation received: %s %s size=%.4f price=%.2f (~%.0f $)",
+					d.Symbol, d.Side, size, price, volumeUSDT)
 
 				aggr.AddEvent(aggregator.LiquidationEvent{
 					Exchange: "bybit",
@@ -107,8 +113,10 @@ func listenBybitLiquidations(conn *websocket.Conn, aggr *aggregator.Aggregator) 
 func MaintainBybitTickers(state *aggregator.MarketState) {
 	wsURL := "wss://stream.bybit.com/v5/public/linear"
 	for {
+		log.Printf("[BYBIT] Connecting to Ticker (Funding/OI) stream: %s", wsURL)
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
+			log.Printf("[BYBIT] Ticker dial error: %v. Reconnecting in 5s...", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -117,11 +125,12 @@ func MaintainBybitTickers(state *aggregator.MarketState) {
 			"args": []string{"tickers.BTCUSDT"},
 		}
 		if err := conn.WriteJSON(subMsg); err != nil {
-			log.Printf("Bybit Ticker subscribe error: %v", err)
+			log.Printf("[BYBIT] Ticker subscribe error: %v. Reconnecting in 5s...", err)
 			conn.Close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		log.Println("[BYBIT] Ticker stream connected. Subscribed to tickers.BTCUSDT.")
 
 		for {
 			_, message, err := conn.ReadMessage()
@@ -145,6 +154,7 @@ func MaintainBybitTickers(state *aggregator.MarketState) {
 			}
 		}
 		conn.Close()
+		log.Println("[BYBIT] Ticker stream disconnected. Reconnecting in 5s...")
 		time.Sleep(5 * time.Second)
 	}
 }
