@@ -6,8 +6,8 @@ import (
 	"os"
 
 	"github.com/robmeijerink/MarktPandaBot/internal/aggregator"
-	"github.com/robmeijerink/MarktPandaBot/internal/binance"
 	"github.com/robmeijerink/MarktPandaBot/internal/bybit"
+	"github.com/robmeijerink/MarktPandaBot/internal/okx"
 )
 
 const (
@@ -33,11 +33,11 @@ func main() {
 	log.Println("[MAIN] Starting data streams and decision engine...")
 
 	// Primary Streams (Liquidations)
-	go binance.MaintainBinanceForceOrders(aggr)
+	go okx.MaintainOKXLiquidations(aggr)
 	go bybit.MaintainBybitLiquidations(aggr)
 
-	// Secondary Streams (Stateful Context: Funding & OI)
-	go binance.MaintainBinanceMarkPrice(state)
+	// Secondary Streams (Stateful Context: Funding, OI & Price)
+	go okx.MaintainOKXContext(state)
 	go bybit.MaintainBybitTickers(state)
 
 	// Decision Engine

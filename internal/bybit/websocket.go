@@ -28,9 +28,9 @@ type BybitLiquidation struct {
 type BybitTicker struct {
 	Topic string `json:"topic"`
 	Data  struct {
-		Symbol       string `json:"symbol"`
-		FundingRate  string `json:"fundingRate"`
-		OpenInterest string `json:"openInterest"`
+		Symbol            string `json:"symbol"`
+		FundingRate       string `json:"fundingRate"`
+		OpenInterestValue string `json:"openInterestValue"` // OI in USD (matches OKX oiUsd)
 	} `json:"data"`
 }
 
@@ -139,14 +139,14 @@ func MaintainBybitTickers(state *aggregator.MarketState) {
 			}
 			var event BybitTicker
 			if err := json.Unmarshal(message, &event); err == nil && event.Topic != "" {
-				if event.Data.FundingRate != "" || event.Data.OpenInterest != "" {
+				if event.Data.FundingRate != "" || event.Data.OpenInterestValue != "" {
 					state.Mu.Lock()
 					if event.Data.FundingRate != "" {
 						rate, _ := strconv.ParseFloat(event.Data.FundingRate, 64)
 						state.BybitFunding = rate
 					}
-					if event.Data.OpenInterest != "" {
-						oi, _ := strconv.ParseFloat(event.Data.OpenInterest, 64)
+					if event.Data.OpenInterestValue != "" {
+						oi, _ := strconv.ParseFloat(event.Data.OpenInterestValue, 64)
 						state.BybitOI = oi
 					}
 					state.Mu.Unlock()

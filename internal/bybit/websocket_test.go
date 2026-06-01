@@ -24,7 +24,7 @@ func TestBybitLiquidationUnmarshal(t *testing.T) {
 }
 
 func TestBybitTickerUnmarshal(t *testing.T) {
-	payload := []byte(`{"topic":"tickers.BTCUSDT","data":{"symbol":"BTCUSDT","fundingRate":"0.0001","openInterest":"1500.50"}}`)
+	payload := []byte(`{"topic":"tickers.BTCUSDT","data":{"symbol":"BTCUSDT","fundingRate":"0.0001","openInterestValue":"4286132155.70"}}`)
 	var event BybitTicker
 
 	err := json.Unmarshal(payload, &event)
@@ -36,7 +36,7 @@ func TestBybitTickerUnmarshal(t *testing.T) {
 		t.Errorf("expected tickers.BTCUSDT, got %s", event.Topic)
 	}
 
-	if event.Data.OpenInterest != "1500.50" {
-		t.Errorf("expected 1500.50, got %s", event.Data.OpenInterest)
+	if event.Data.OpenInterestValue != "4286132155.70" {
+		t.Errorf("expected 4286132155.70, got %s", event.Data.OpenInterestValue)
 	}
 }

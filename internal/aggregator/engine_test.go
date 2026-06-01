@@ -14,8 +14,8 @@ func TestAggregator_Concurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			aggr.AddEvent(LiquidationEvent{
-				Exchange: "binance",
-				Symbol:   "BTCUSDT",
+				Exchange: "okx",
+				Symbol:   "BTC-USDT-SWAP",
 				Price:    74000.50,
 				Qty:      1.5,
 				Side:     "SELL",
@@ -43,14 +43,14 @@ func TestMarketState_ThreadSafety(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		state.Mu.Lock()
-		state.BinanceFunding = 0.01
+		state.OKXFunding = 0.01
 		state.Mu.Unlock()
 	}()
 
 	go func() {
 		defer wg.Done()
 		state.Mu.RLock()
-		_ = state.BinanceFunding
+		_ = state.OKXFunding
 		state.Mu.RUnlock()
 	}()
 
