@@ -10,13 +10,18 @@ import (
 	"github.com/robmeijerink/MarktPandaBot/internal/aggregator"
 )
 
-// Bybit specific structs
+const bybitPingInterval = 18 * time.Second
+
+// Bybit specific structs.
+// The allLiquidation.{symbol} topic delivers `data` as an array of entries
+// with abbreviated keys (s=symbol, S=side, p=bankruptcy price, v=size).
 type BybitLiquidation struct {
-	Data struct {
-		Symbol string `json:"symbol"`
-		Side   string `json:"side"`
-		Price  string `json:"price"`
-		Size   string `json:"size"`
+	Topic string `json:"topic"`
+	Data  []struct {
+		Symbol string `json:"s"`
+		Side   string `json:"S"`
+		Price  string `json:"p"`
+		Size   string `json:"v"`
 	} `json:"data"`
 }
 
@@ -42,7 +47,12 @@ func MaintainBybitLiquidations(aggr *aggregator.Aggregator) {
 			"op":   "subscribe",
 			"args": []string{"allLiquidation.BTCUSDT"},
 		}
-		conn.WriteJSON(subMsg)
+		if err := conn.WriteJSON(subMsg); err != nil {
+			log.Printf("Bybit Liquidation subscribe error: %v", err)
+			conn.Close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		listenBybitLiquidations(conn, aggr)
 		conn.Close()
 		time.Sleep(5 * time.Second)
@@ -50,27 +60,47 @@ func MaintainBybitLiquidations(aggr *aggregator.Aggregator) {
 }
 
 func listenBybitLiquidations(conn *websocket.Conn, aggr *aggregator.Aggregator) {
+	pingTicker := time.NewTicker(bybitPingInterval)
+	defer pingTicker.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var event BybitLiquidation
+			if err := json.Unmarshal(message, &event); err != nil || len(event.Data) == 0 {
+				continue
+			}
+			for _, d := range event.Data {
+				price, _ := strconv.ParseFloat(d.Price, 64)
+				size, _ := strconv.ParseFloat(d.Size, 64)
+
+				volumeUSDT := size * price
+
+				aggr.AddEvent(aggregator.LiquidationEvent{
+					Exchange: "bybit",
+					Symbol:   d.Symbol,
+					Price:    price,
+					Qty:      volumeUSDT,
+					Side:     d.Side,
+				})
+			}
+		}
+	}()
+
 	for {
-		_, message, err := conn.ReadMessage()
-		if err != nil {
+		select {
+		case <-done:
 			return
+		case <-pingTicker.C:
+			if err := conn.WriteJSON(map[string]string{"op": "ping"}); err != nil {
+				return
+			}
 		}
-		var event BybitLiquidation
-		if err := json.Unmarshal(message, &event); err != nil || event.Data.Symbol == "" {
-			continue
-		}
-		price, _ := strconv.ParseFloat(event.Data.Price, 64)
-		size, _ := strconv.ParseFloat(event.Data.Size, 64)
-
-		volumeUSDT := size * price
-
-		aggr.AddEvent(aggregator.LiquidationEvent{
-			Exchange: "bybit",
-			Symbol:   event.Data.Symbol,
-			Price:    price,
-			Qty:      volumeUSDT,
-			Side:     event.Data.Side,
-		})
 	}
 }
 
@@ -86,7 +116,12 @@ func MaintainBybitTickers(state *aggregator.MarketState) {
 			"op":   "subscribe",
 			"args": []string{"tickers.BTCUSDT"},
 		}
-		conn.WriteJSON(subMsg)
+		if err := conn.WriteJSON(subMsg); err != nil {
+			log.Printf("Bybit Ticker subscribe error: %v", err)
+			conn.Close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
 
 		for {
 			_, message, err := conn.ReadMessage()

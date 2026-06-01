@@ -6,7 +6,7 @@ import (
 )
 
 func TestBybitLiquidationUnmarshal(t *testing.T) {
-	payload := []byte(`{"data":{"symbol":"BTCUSDT","side":"Buy","price":"74000.00","size":"1.5"}}`)
+	payload := []byte(`{"topic":"allLiquidation.BTCUSDT","data":[{"T":1739502302929,"s":"BTCUSDT","S":"Buy","v":"1.5","p":"74000.00"}]}`)
 	var event BybitLiquidation
 
 	err := json.Unmarshal(payload, &event)
@@ -14,8 +14,12 @@ func TestBybitLiquidationUnmarshal(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if event.Data.Symbol != "BTCUSDT" {
-		t.Errorf("expected BTCUSDT, got %s", event.Data.Symbol)
+	if len(event.Data) != 1 {
+		t.Fatalf("expected 1 liquidation entry, got %d", len(event.Data))
+	}
+
+	if event.Data[0].Symbol != "BTCUSDT" {
+		t.Errorf("expected BTCUSDT, got %s", event.Data[0].Symbol)
 	}
 }
 
