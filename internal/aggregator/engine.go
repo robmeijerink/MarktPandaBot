@@ -10,7 +10,7 @@ import (
 
 const (
 	EvaluationInterval      = 5 * time.Minute
-	BinanceTriggerVolumeBTC = 5.0
+	BinanceTriggerVolumeBTC = 3.0
 	BybitConfirmVolumeUSDT  = 100000.0
 )
 
