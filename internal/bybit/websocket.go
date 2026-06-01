@@ -14,7 +14,10 @@ const bybitPingInterval = 18 * time.Second
 
 // Bybit specific structs.
 // The allLiquidation.{symbol} topic delivers `data` as an array of entries
-// with abbreviated keys (s=symbol, S=side, p=bankruptcy price, v=size).
+// with abbreviated keys (s=symbol, S=position side, p=bankruptcy price, v=size).
+// NOTE: Bybit's `S` is the POSITION side that was liquidated (S="Buy" => a LONG
+// was liquidated), the opposite of OKX/Binance which report the liquidation
+// ORDER side. normaliseSide() converts it to the engine's order-side convention.
 type BybitLiquidation struct {
 	Topic string `json:"topic"`
 	Data  []struct {
@@ -25,12 +28,31 @@ type BybitLiquidation struct {
 	} `json:"data"`
 }
 
+// normaliseSide maps Bybit's liquidated POSITION side to the order-side
+// convention the engine uses (SELL = a long was liquidated, BUY = a short was
+// liquidated), matching OKX/Binance. Bybit: S="Buy" => long liquidated => SELL.
+func normaliseSide(bybitPositionSide string) string {
+	switch bybitPositionSide {
+	case "Buy", "buy":
+		return "SELL" // a long position was liquidated
+	case "Sell", "sell":
+		return "BUY" // a short position was liquidated
+	default:
+		return bybitPositionSide
+	}
+}
+
 type BybitTicker struct {
 	Topic string `json:"topic"`
 	Data  struct {
 		Symbol            string `json:"symbol"`
 		FundingRate       string `json:"fundingRate"`
 		OpenInterestValue string `json:"openInterestValue"` // OI in USD (matches OKX oiUsd)
+		LastPrice         string `json:"lastPrice"`
+		Price24hPcnt      string `json:"price24hPcnt"` // 24h change as a fraction
+		HighPrice24h      string `json:"highPrice24h"`
+		LowPrice24h       string `json:"lowPrice24h"`
+		Turnover24h       string `json:"turnover24h"` // 24h turnover in USD
 	} `json:"data"`
 }
 
@@ -83,16 +105,21 @@ func listenBybitLiquidations(conn *websocket.Conn, aggr *aggregator.Aggregator) 
 				size, _ := strconv.ParseFloat(d.Size, 64)
 
 				volumeUSDT := size * price
+				side := normaliseSide(d.Side)
+				dir := "long"
+				if side == "BUY" {
+					dir = "short"
+				}
 
-				log.Printf("[BYBIT] Liquidation received: %s %s size=%.4f price=%.2f (~%.0f $)",
-					d.Symbol, d.Side, size, price, volumeUSDT)
+				log.Printf("[BYBIT] Liquidation received: %s %s-liq size=%.4f price=%.2f (~%.0f $)",
+					d.Symbol, dir, size, price, volumeUSDT)
 
 				aggr.AddEvent(aggregator.LiquidationEvent{
 					Exchange: "bybit",
 					Symbol:   d.Symbol,
 					Price:    price,
-					Qty:      volumeUSDT,
-					Side:     d.Side,
+					Qty:      size, // BTC; engine derives USD as Qty*Price (same as OKX)
+					Side:     side,
 				})
 			}
 		}
@@ -139,18 +166,39 @@ func MaintainBybitTickers(state *aggregator.MarketState) {
 			}
 			var event BybitTicker
 			if err := json.Unmarshal(message, &event); err == nil && event.Topic != "" {
-				if event.Data.FundingRate != "" || event.Data.OpenInterestValue != "" {
-					state.Mu.Lock()
-					if event.Data.FundingRate != "" {
-						rate, _ := strconv.ParseFloat(event.Data.FundingRate, 64)
-						state.BybitFunding = rate
-					}
-					if event.Data.OpenInterestValue != "" {
-						oi, _ := strconv.ParseFloat(event.Data.OpenInterestValue, 64)
-						state.BybitOI = oi
-					}
-					state.Mu.Unlock()
+				d := event.Data
+				// Bybit deltas only carry changed fields, so update each one
+				// only when present.
+				state.Mu.Lock()
+				if d.FundingRate != "" {
+					rate, _ := strconv.ParseFloat(d.FundingRate, 64)
+					state.BybitFunding = rate
 				}
+				if d.OpenInterestValue != "" {
+					oi, _ := strconv.ParseFloat(d.OpenInterestValue, 64)
+					state.BybitOI = oi
+				}
+				if d.LastPrice != "" {
+					p, _ := strconv.ParseFloat(d.LastPrice, 64)
+					state.BybitLastPrice = p
+				}
+				if d.Price24hPcnt != "" {
+					pct, _ := strconv.ParseFloat(d.Price24hPcnt, 64)
+					state.BybitPct24h = pct
+				}
+				if d.HighPrice24h != "" {
+					h, _ := strconv.ParseFloat(d.HighPrice24h, 64)
+					state.BybitHigh24h = h
+				}
+				if d.LowPrice24h != "" {
+					l, _ := strconv.ParseFloat(d.LowPrice24h, 64)
+					state.BybitLow24h = l
+				}
+				if d.Turnover24h != "" {
+					to, _ := strconv.ParseFloat(d.Turnover24h, 64)
+					state.BybitTurnover24h = to
+				}
+				state.Mu.Unlock()
 			}
 		}
 		conn.Close()

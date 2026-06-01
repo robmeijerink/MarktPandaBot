@@ -40,7 +40,6 @@ func TestOKXContextChannels(t *testing.T) {
 	}{
 		{"funding", `{"arg":{"channel":"funding-rate","instId":"BTC-USDT-SWAP"},"data":[{"fundingRate":"0.0001"}]}`, "funding-rate"},
 		{"oi", `{"arg":{"channel":"open-interest","instId":"BTC-USDT-SWAP"},"data":[{"oiUsd":"2563325663.03"}]}`, "open-interest"},
-		{"ticker", `{"arg":{"channel":"tickers","instId":"BTC-USDT-SWAP"},"data":[{"last":"71589.6","open24h":"73463.8"}]}`, "tickers"},
 	}
 	for _, c := range cases {
 		var msg okxChannelMsg

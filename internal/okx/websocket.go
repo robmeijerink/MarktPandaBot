@@ -52,11 +52,6 @@ type okxOIData struct {
 	OiUsd string `json:"oiUsd"`
 }
 
-type okxTickerData struct {
-	Last    string `json:"last"`
-	Open24h string `json:"open24h"`
-}
-
 // MaintainOKXLiquidations is the primary trigger feed: BTC liquidations on OKX.
 // OKX replaces Binance because Binance USDⓈ-M Futures is geo-restricted from
 // US regions (e.g. GCE us-central1), whereas OKX public data is reachable.
@@ -162,7 +157,6 @@ func MaintainOKXContext(state *aggregator.MarketState) {
 			"args": []map[string]string{
 				{"channel": "funding-rate", "instId": okxBTCInst},
 				{"channel": "open-interest", "instId": okxBTCInst},
-				{"channel": "tickers", "instId": okxBTCInst},
 			},
 		}
 		if err := conn.WriteJSON(subMsg); err != nil {
@@ -171,7 +165,7 @@ func MaintainOKXContext(state *aggregator.MarketState) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		log.Println("[OKX] Context stream connected. Subscribed to funding-rate, open-interest, tickers (BTC-USDT-SWAP).")
+		log.Println("[OKX] Context stream connected. Subscribed to funding-rate, open-interest (BTC-USDT-SWAP).")
 		listenOKXContext(conn, state)
 		conn.Close()
 		log.Println("[OKX] Context stream disconnected. Reconnecting in 5s...")
@@ -210,20 +204,6 @@ func listenOKXContext(conn *websocket.Conn, state *aggregator.MarketState) {
 					oi, _ := strconv.ParseFloat(d.OiUsd, 64)
 					state.Mu.Lock()
 					state.OKXOI = oi
-					state.Mu.Unlock()
-				}
-			case "tickers":
-				var d okxTickerData
-				if json.Unmarshal(msg.Data[0], &d) == nil {
-					state.Mu.Lock()
-					if d.Last != "" {
-						p, _ := strconv.ParseFloat(d.Last, 64)
-						state.OKXLastPrice = p
-					}
-					if d.Open24h != "" {
-						o, _ := strconv.ParseFloat(d.Open24h, 64)
-						state.OKXOpen24h = o
-					}
 					state.Mu.Unlock()
 				}
 			}

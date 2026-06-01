@@ -23,6 +23,22 @@ func TestBybitLiquidationUnmarshal(t *testing.T) {
 	}
 }
 
+func TestNormaliseSide(t *testing.T) {
+	// Bybit reports POSITION side: Buy => a long was liquidated, which in the
+	// engine's order-side convention is SELL. Sell => short liquidated => BUY.
+	cases := map[string]string{
+		"Buy":  "SELL",
+		"buy":  "SELL",
+		"Sell": "BUY",
+		"sell": "BUY",
+	}
+	for in, want := range cases {
+		if got := normaliseSide(in); got != want {
+			t.Errorf("normaliseSide(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestBybitTickerUnmarshal(t *testing.T) {
 	payload := []byte(`{"topic":"tickers.BTCUSDT","data":{"symbol":"BTCUSDT","fundingRate":"0.0001","openInterestValue":"4286132155.70"}}`)
 	var event BybitTicker
