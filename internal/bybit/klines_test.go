@@ -37,9 +37,9 @@ func TestBybitFetchKlinesParsingAndOrdering(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	old := bybitRESTBase
-	bybitRESTBase = srv.URL
-	defer func() { bybitRESTBase = old }()
+	old := bybitRESTBases
+	bybitRESTBases = []string{srv.URL}
+	defer func() { bybitRESTBases = old }()
 
 	klines, err := FetchKlines(srv.Client(), 100)
 	if err != nil {
@@ -72,9 +72,9 @@ func TestBybitFetchClose(t *testing.T) {
 		fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
-	old := bybitRESTBase
-	bybitRESTBase = srv.URL
-	defer func() { bybitRESTBase = old }()
+	old := bybitRESTBases
+	bybitRESTBases = []string{srv.URL}
+	defer func() { bybitRESTBases = old }()
 
 	cl, ok := FetchClose(srv.Client(), target)
 	if !ok || cl != 64321.5 {
@@ -90,11 +90,40 @@ func TestBybitFetchKlinesHTTPError(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
-	old := bybitRESTBase
-	bybitRESTBase = srv.URL
-	defer func() { bybitRESTBase = old }()
+	old := bybitRESTBases
+	bybitRESTBases = []string{srv.URL}
+	defer func() { bybitRESTBases = old }()
 
 	if _, err := FetchKlines(srv.Client(), 10); err == nil {
 		t.Fatal("expected error on HTTP 429")
+	}
+}
+
+func TestBybitFetchKlinesFallsBackToMirror(t *testing.T) {
+	cur := time.Now().UTC().Truncate(5 * time.Minute)
+	closed := cur.Add(-5 * time.Minute)
+
+	// First host is geo-blocked (403); the mirror serves a valid response.
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer blocked.Close()
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"retCode":0,"result":{"list":[%s,%s]}}`,
+			bybitKlineRow(cur, 7, 7, 7, 7, 1, 1),
+			bybitKlineRow(closed, 2, 3, 1, 2.5, 10, 2500))
+	}))
+	defer mirror.Close()
+
+	old := bybitRESTBases
+	bybitRESTBases = []string{blocked.URL, mirror.URL}
+	defer func() { bybitRESTBases = old }()
+
+	klines, err := FetchKlines(mirror.Client(), 5)
+	if err != nil {
+		t.Fatalf("expected mirror fallback to succeed, got: %v", err)
+	}
+	if len(klines) != 1 || klines[0].QuoteVol != 2500 {
+		t.Fatalf("fallback returned %d klines (want 1, QuoteVol 2500)", len(klines))
 	}
 }

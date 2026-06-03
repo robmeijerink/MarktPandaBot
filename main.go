@@ -41,8 +41,17 @@ func main() {
 
 	klineClient := &http.Client{Timeout: time.Duration(cfg.KlineFetchTimeoutSec) * time.Second}
 	confMgr := aggregator.NewConfirmationManager(cfg, flow,
-		// Reclaim reference: closing price of the target candle on PrimaryExchange.
-		func(bucketStart time.Time) (float64, bool) { return bybit.FetchClose(klineClient, bucketStart) },
+		// Reclaim reference: closing price of the target candle on PrimaryExchange
+		// (Bybit). If Bybit REST is geo-blocked (HTTP 403) we fall back to the OKX
+		// close so the confirmation still yields a real verdict instead of always
+		// reading "Not confirmed". BTC basis between the two venues is a few dollars,
+		// negligible against a liquidation-range reclaim level.
+		func(bucketStart time.Time) (float64, bool) {
+			if px, ok := bybit.FetchClose(klineClient, bucketStart); ok {
+				return px, true
+			}
+			return okx.FetchClose(klineClient, bucketStart)
+		},
 		func(msg string) { telegram.DispatchTelegramAlert(telegramToken, chatID, msg) },
 	)
 

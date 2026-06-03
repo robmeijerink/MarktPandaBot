@@ -26,8 +26,11 @@ const (
 	bkTurnover = 6
 )
 
-// bybitRESTBase is a var (not const) so tests can point it at an httptest server.
-var bybitRESTBase = "https://api.bybit.com"
+// bybitRESTBases are tried in order. api.bytick.com is Bybit's official mirror and
+// commonly answers when api.bybit.com is geo-blocked (HTTP 403) from a given host
+// — note the WebSocket feed keeps working in that case, only REST is blocked. It
+// is a var so tests can point it at an httptest server.
+var bybitRESTBases = []string{"https://api.bybit.com", "https://api.bytick.com"}
 
 type bybitKlineResp struct {
 	RetCode int    `json:"retCode"`
@@ -39,7 +42,8 @@ type bybitKlineResp struct {
 
 // FetchKlines returns up to `limit` of the most recent CLOSED 5-minute klines for
 // BTCUSDT (linear), in chronological order (oldest first). The in-progress candle
-// is excluded so only completed buckets enter the ring.
+// is excluded so only completed buckets enter the ring. It falls back across
+// bybitRESTBases so a geo-block on one host does not kill the volume baseline.
 func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
 	if limit > bybitKlineLimit {
 		limit = bybitKlineLimit
@@ -49,23 +53,22 @@ func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
 	q.Set("symbol", "BTCUSDT")
 	q.Set("interval", "5")
 	q.Set("limit", strconv.Itoa(limit+1)) // +1 to absorb the in-progress candle
-
-	endpoint := bybitRESTBase + "/v5/market/kline?" + q.Encode()
-	resp, err := client.Get(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bybit kline HTTP %d", resp.StatusCode)
-	}
+	query := q.Encode()
 
 	var parsed bybitKlineResp
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, err
+	var lastErr error
+	for _, base := range bybitRESTBases {
+		p, err := requestBybitKlines(client, base+"/v5/market/kline?"+query)
+		if err != nil {
+			lastErr = err
+			continue // try the next host (e.g. bytick mirror on a 403)
+		}
+		parsed = p
+		lastErr = nil
+		break
 	}
-	if parsed.RetCode != 0 {
-		return nil, fmt.Errorf("bybit kline retCode %d: %s", parsed.RetCode, parsed.RetMsg)
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	currentBucket := time.Now().UTC().Truncate(5 * time.Minute)
@@ -102,6 +105,26 @@ func FetchClose(client *http.Client, bucketStart time.Time) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// requestBybitKlines performs one kline GET against a single host and decodes it.
+func requestBybitKlines(client *http.Client, endpoint string) (bybitKlineResp, error) {
+	var parsed bybitKlineResp
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return parsed, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return parsed, fmt.Errorf("bybit kline HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return parsed, err
+	}
+	if parsed.RetCode != 0 {
+		return parsed, fmt.Errorf("bybit kline retCode %d: %s", parsed.RetCode, parsed.RetMsg)
+	}
+	return parsed, nil
 }
 
 func parseBybitKline(row []string) (aggregator.Kline, bool) {
