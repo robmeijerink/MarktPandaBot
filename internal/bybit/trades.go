@@ -28,6 +28,34 @@ type bybitPublicTrade struct {
 	} `json:"data"`
 }
 
+// tradeFlow is one decoded fill: its trade time and signed quote/USD notional
+// (+taker-buy, −taker-sell).
+type tradeFlow struct {
+	ts  time.Time
+	usd float64
+}
+
+// decodeBybitTrades parses a publicTrade.BTCUSDT message into signed flows. A
+// taker-sell ("Sell") is negative, removing from net flow. Malformed or empty
+// messages yield no flows.
+func decodeBybitTrades(message []byte) []tradeFlow {
+	var event bybitPublicTrade
+	if err := json.Unmarshal(message, &event); err != nil || len(event.Data) == 0 {
+		return nil
+	}
+	out := make([]tradeFlow, 0, len(event.Data))
+	for _, d := range event.Data {
+		price, _ := strconv.ParseFloat(d.Price, 64)
+		size, _ := strconv.ParseFloat(d.Size, 64)
+		usd := size * price
+		if d.Side == "Sell" || d.Side == "sell" {
+			usd = -usd // taker-sell removes from net flow
+		}
+		out = append(out, tradeFlow{ts: time.UnixMilli(d.Time).UTC(), usd: usd})
+	}
+	return out
+}
+
 // MaintainBybitPerpTrades feeds perp taker flow (for CVD, §6) from the linear
 // BTCUSDT publicTrade stream into the FlowTracker.
 func MaintainBybitPerpTrades(flow *aggregator.FlowTracker) {
@@ -85,18 +113,8 @@ func listenBybitTrades(conn *websocket.Conn, record func(ts time.Time, signedUSD
 			if err != nil {
 				return
 			}
-			var event bybitPublicTrade
-			if err := json.Unmarshal(message, &event); err != nil || len(event.Data) == 0 {
-				continue
-			}
-			for _, d := range event.Data {
-				price, _ := strconv.ParseFloat(d.Price, 64)
-				size, _ := strconv.ParseFloat(d.Size, 64)
-				usd := size * price
-				if d.Side == "Sell" || d.Side == "sell" {
-					usd = -usd // taker-sell removes from net flow
-				}
-				record(time.UnixMilli(d.Time).UTC(), usd)
+			for _, f := range decodeBybitTrades(message) {
+				record(f.ts, f.usd)
 			}
 		}
 	}()

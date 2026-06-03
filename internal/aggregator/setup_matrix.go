@@ -11,13 +11,13 @@ import (
 // the ring median. This struct is the single, explicit hand-off from the existing
 // alert path into the new scoring code (D2: the existing alert is the trigger).
 type SetupInputs struct {
-	OIChangePct   float64 // signed OI change over the window, in % (negative == drop)
-	LongLiqUSDT   float64 // combined long-liquidation notional this window
-	ShortLiqUSDT  float64 // combined short-liquidation notional this window
-	FundingRate   float64 // current funding on PrimaryExchange (fraction, e.g. -0.0001)
-	BucketVol     float64 // most recent completed aggregated bucket quote-volume
-	MedianVol     float64 // ring median
-	VolMedianOK   bool    // false while the ring is still warming up
+	OIChangePct  float64 // signed OI change over the window, in % (negative == drop)
+	LongLiqUSDT  float64 // combined long-liquidation notional this window
+	ShortLiqUSDT float64 // combined short-liquidation notional this window
+	FundingRate  float64 // current funding on PrimaryExchange (fraction, e.g. -0.0001)
+	BucketVol    float64 // most recent completed aggregated bucket quote-volume
+	MedianVol    float64 // ring median
+	VolMedianOK  bool    // false while the ring is still warming up
 }
 
 // SetupScore is the scored result of one T0 evaluation.

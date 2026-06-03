@@ -31,6 +31,49 @@ type okxTradeMsg struct {
 	} `json:"data"`
 }
 
+// okxFlow is one decoded fill: trade time, signed quote/USD notional, and whether
+// it is a perp (true) or spot (false) trade.
+type okxFlow struct {
+	ts   time.Time
+	usd  float64
+	perp bool
+}
+
+// decodeOKXTrades parses a "trades" channel message into signed flows. Perp size
+// is in contracts (×okxBTCContractSize BTC); spot size is already in base (BTC). A
+// taker-sell ("sell") is negative. Instruments other than the BTC perp/spot are
+// ignored.
+func decodeOKXTrades(message []byte) []okxFlow {
+	var msg okxTradeMsg
+	if err := json.Unmarshal(message, &msg); err != nil || len(msg.Data) == 0 {
+		return nil
+	}
+	out := make([]okxFlow, 0, len(msg.Data))
+	for _, d := range msg.Data {
+		price, _ := strconv.ParseFloat(d.Px, 64)
+		sz, _ := strconv.ParseFloat(d.Sz, 64)
+		tsMs, _ := strconv.ParseInt(d.Ts, 10, 64)
+		ts := time.UnixMilli(tsMs).UTC()
+
+		var usd float64
+		var perp bool
+		switch d.InstID {
+		case okxBTCInst: // perp: size is in contracts
+			usd = sz * okxBTCContractSize * price
+			perp = true
+		case okxBTCSpotInst: // spot: size is in base (BTC)
+			usd = sz * price
+		default:
+			continue
+		}
+		if d.Side == "sell" {
+			usd = -usd
+		}
+		out = append(out, okxFlow{ts: ts, usd: usd, perp: perp})
+	}
+	return out
+}
+
 // MaintainOKXTrades subscribes to perp and spot BTC trades on the single public
 // endpoint and feeds CVD (perp) and Spot-vs-Perp (spot) flow into the tracker.
 func MaintainOKXTrades(flow *aggregator.FlowTracker) {
@@ -75,29 +118,11 @@ func listenOKXTrades(conn *websocket.Conn, flow *aggregator.FlowTracker) {
 			if err != nil {
 				return
 			}
-			var msg okxTradeMsg
-			if err := json.Unmarshal(message, &msg); err != nil || len(msg.Data) == 0 {
-				continue
-			}
-			for _, d := range msg.Data {
-				price, _ := strconv.ParseFloat(d.Px, 64)
-				sz, _ := strconv.ParseFloat(d.Sz, 64)
-				tsMs, _ := strconv.ParseInt(d.Ts, 10, 64)
-				ts := time.UnixMilli(tsMs).UTC()
-
-				switch d.InstID {
-				case okxBTCInst: // perp: size is in contracts
-					usd := sz * okxBTCContractSize * price
-					if d.Side == "sell" {
-						usd = -usd
-					}
-					flow.AddPerpTrade(ts, usd)
-				case okxBTCSpotInst: // spot: size is in base (BTC)
-					usd := sz * price
-					if d.Side == "sell" {
-						usd = -usd
-					}
-					flow.AddSpotTrade(ts, usd)
+			for _, f := range decodeOKXTrades(message) {
+				if f.perp {
+					flow.AddPerpTrade(f.ts, f.usd)
+				} else {
+					flow.AddSpotTrade(f.ts, f.usd)
 				}
 			}
 		}

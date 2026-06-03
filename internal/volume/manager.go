@@ -91,7 +91,7 @@ func RunLivePoll(ring *aggregator.VolumeRing, cfg aggregator.Config) {
 		time.Sleep(nextBoundary.Add(settleDelay).Sub(now))
 
 		bucket := nextBoundary.Add(-5 * time.Minute) // the bucket that just closed
-		sum, matched := aggregatedBucketVol(client, cfg, bucket)
+		sum, matched := aggregatedBucketVol(fetchers(), client, bucket)
 		if matched == 0 {
 			log.Printf("[VOLUME] Live poll: no closed kline found for bucket %s; skipping this cycle.",
 				bucket.Format("15:04"))
@@ -104,9 +104,11 @@ func RunLivePoll(ring *aggregator.VolumeRing, cfg aggregator.Config) {
 }
 
 // aggregatedBucketVol sums the quote-volume of the closed kline that opened at
-// `bucket` across exchanges. It returns the sum and how many venues supplied it.
-func aggregatedBucketVol(client *http.Client, cfg aggregator.Config, bucket time.Time) (sum float64, matched int) {
-	for _, f := range fetchers() {
+// `bucket` across the given venues. It returns the sum and how many venues
+// supplied it (0 => nothing matched, caller should skip the cycle). Fetchers are
+// passed in so the summation can be unit-tested without network.
+func aggregatedBucketVol(fetchers []klineFetcher, client *http.Client, bucket time.Time) (sum float64, matched int) {
+	for _, f := range fetchers {
 		klines, err := f.fetch(client, 3)
 		if err != nil {
 			log.Printf("[VOLUME] Live poll: %s fetch error: %v", f.name, err)

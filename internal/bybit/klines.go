@@ -16,7 +16,6 @@ import (
 // live paths, per D5/§1). Endpoint/field layout per the Bybit v5 docs; the
 // per-request cap is 1000, comfortably above BufferSize (288).
 const (
-	bybitRESTBase   = "https://api.bybit.com"
 	bybitKlineLimit = 1000
 	// kline list index layout: [start, open, high, low, close, volume, turnover].
 	bkStart    = 0
@@ -26,6 +25,9 @@ const (
 	bkClose    = 4
 	bkTurnover = 6
 )
+
+// bybitRESTBase is a var (not const) so tests can point it at an httptest server.
+var bybitRESTBase = "https://api.bybit.com"
 
 type bybitKlineResp struct {
 	RetCode int    `json:"retCode"`

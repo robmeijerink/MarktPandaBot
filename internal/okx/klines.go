@@ -18,8 +18,7 @@ import (
 // candles and caps at 300 per request — well under the 1000 Bybit allows — so we
 // page with the `after` cursor to gather BufferSize buckets (§3).
 const (
-	okxRESTBase     = "https://www.okx.com"
-	okxCandleLimit  = 300
+	okxCandleLimit  = 300 // OKX per-request cap for /market/candles
 	ocTs            = 0
 	ocOpen          = 1
 	ocHigh          = 2
@@ -29,6 +28,9 @@ const (
 	ocConfirm       = 8
 	okxCandleFields = 9
 )
+
+// okxRESTBase is a var (not const) so tests can point it at an httptest server.
+var okxRESTBase = "https://www.okx.com"
 
 type okxCandleResp struct {
 	Code string     `json:"code"`
@@ -43,9 +45,23 @@ type okxCandleResp struct {
 func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
 	var collected []aggregator.Kline
 	var after string // ms timestamp cursor; empty == most recent
+	firstPage := true
 
 	for len(collected) < limit {
-		batch, err := fetchOKXCandlePage(client, after, okxCandleLimit)
+		// Request only what is still needed. The most recent page also carries the
+		// in-progress candle (filtered out by parseOKXCandle), so pad the first
+		// page by one to still net `limit` closed candles without over-fetching on
+		// small requests (e.g. the live poll asking for 3).
+		need := limit - len(collected)
+		pageLimit := need
+		if firstPage {
+			pageLimit = need + 1
+		}
+		if pageLimit > okxCandleLimit {
+			pageLimit = okxCandleLimit
+		}
+
+		batch, err := fetchOKXCandlePage(client, after, pageLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -55,13 +71,19 @@ func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
 		// batch is newest-first; the last element is the oldest in this page.
 		oldest := batch[len(batch)-1]
 		after = strconv.FormatInt(oldest.BucketStart.UnixMilli(), 10)
+		collected = append(collected, batch...)
 
-		for _, k := range batch {
-			collected = append(collected, k)
+		// End-of-history: the server returned fewer closed candles than the page
+		// could hold (the first page also gives up one slot to the in-progress
+		// candle we filtered out).
+		maxClosed := pageLimit
+		if firstPage {
+			maxClosed = pageLimit - 1
 		}
-		if len(batch) < okxCandleLimit {
-			break // reached the end of available history
+		if len(batch) < maxClosed {
+			break
 		}
+		firstPage = false
 	}
 
 	// collected is newest-first across pages; reverse to chronological order and
@@ -78,7 +100,9 @@ func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
 // FetchClose returns the closing price of the BTC-USDT-SWAP 5-minute candle that
 // opened at bucketStart, or ok=false if it is not in the recent window.
 func FetchClose(client *http.Client, bucketStart time.Time) (float64, bool) {
-	batch, err := fetchOKXCandlePage(client, "", okxCandleLimit)
+	// The just-closed target candle is among the most recent; a small page covers
+	// it without pulling the full 300.
+	batch, err := fetchOKXCandlePage(client, "", 12)
 	if err != nil {
 		return 0, false
 	}
