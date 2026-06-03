@@ -4,10 +4,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/robmeijerink/MarktPandaBot/internal/aggregator"
 	"github.com/robmeijerink/MarktPandaBot/internal/bybit"
 	"github.com/robmeijerink/MarktPandaBot/internal/okx"
+	"github.com/robmeijerink/MarktPandaBot/internal/telegram"
+	"github.com/robmeijerink/MarktPandaBot/internal/volume"
 )
 
 const (
@@ -30,6 +33,24 @@ func main() {
 	aggr := &aggregator.Aggregator{}
 	state := &aggregator.MarketState{}
 
+	// Two-stage scoring upgrade (upgrade.md): config, the aggregated 5-min volume
+	// ring, the perp/spot flow tracker, and the cancelable confirmation manager.
+	cfg := aggregator.DefaultConfig()
+	ring := aggregator.NewVolumeRing(cfg)
+	flow := aggregator.NewFlowTracker()
+
+	klineClient := &http.Client{Timeout: time.Duration(cfg.KlineFetchTimeoutSec) * time.Second}
+	confMgr := aggregator.NewConfirmationManager(cfg, flow,
+		// Reclaim reference: closing price of the target candle on PrimaryExchange.
+		func(bucketStart time.Time) (float64, bool) { return bybit.FetchClose(klineClient, bucketStart) },
+		func(msg string) { telegram.DispatchTelegramAlert(telegramToken, chatID, msg) },
+	)
+
+	// Warm boot hydrates the volume ring from REST BEFORE any WebSocket opens
+	// (§3). It is best-effort and never blocks startup indefinitely.
+	log.Println("[MAIN] Warm-booting volume ring from REST klines...")
+	volume.WarmBoot(ring, cfg)
+
 	log.Println("[MAIN] Starting data streams and decision engine...")
 
 	// Primary Streams (Liquidations)
@@ -40,8 +61,16 @@ func main() {
 	go okx.MaintainOKXContext(state)
 	go bybit.MaintainBybitTickers(state)
 
+	// Trade Streams (perp CVD + spot, for the T+N confirmation, §6)
+	go bybit.MaintainBybitPerpTrades(flow)
+	go bybit.MaintainBybitSpotTrades(flow)
+	go okx.MaintainOKXTrades(flow)
+
+	// Live volume poll: append one aggregated bucket per UTC 5-min boundary.
+	go volume.RunLivePoll(ring, cfg)
+
 	// Decision Engine
-	go aggregator.RunConfluenceEngine(aggr, state, telegramToken, chatID)
+	go aggregator.RunConfluenceEngine(aggr, state, cfg, ring, confMgr, telegramToken, chatID)
 
 	// Health Check for Docker/Google Cloud Engine
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

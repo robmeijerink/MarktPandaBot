@@ -267,7 +267,7 @@ func classifySignal(combinedOI, combinedOIDelta, longUSDT, shortUSDT float64) (l
 	return fmt.Sprintf("➡️ %s CONTINUATION UP — shorts flushed, OI rising", conf), dropFraction
 }
 
-func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chatID string) {
+func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config, ring *VolumeRing, confMgr *ConfirmationManager, token, chatID string) {
 	ticker := time.NewTicker(EvaluationInterval)
 	defer ticker.Stop()
 
@@ -394,7 +394,40 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 			curOKXFunding*100, humanUSD(curOKXOI), signedUSD(okxOIDelta),
 		)
 
+		// ─── Two-stage scoring injection (upgrade.md §4–§6) ──────────────────
+		// Single, additive hook into the existing alert path. Everything above is
+		// untouched (APPEND ONLY, rule 1 / D2): the existing logic already decided
+		// to alert; here we only enrich it with the T0 Setup Matrix and, on a
+		// qualifying score, start the cancelable T+N candle-sync confirmation.
+		bucketVol, _ := ring.Latest()
+		medianVol, medianOK := ring.Median()
+		score := ScoreSetup(cfg, SetupInputs{
+			OIChangePct:  oiChangePct,
+			LongLiqUSDT:  combinedLongUSDT,
+			ShortLiqUSDT: combinedShortUSDT,
+			FundingRate:  curBybitFunding, // PrimaryExchange (Bybit) funding
+			BucketVol:    bucketVol,
+			MedianVol:    medianVol,
+			VolMedianOK:  medianOK,
+		})
+		msg += FormatSetupMatrix(cfg, score)
+
+		log.Printf("[ENGINE] T0 Setup Matrix: score %d/%d (OI=%t Skew=%t VolSpike=%t Funding=%t).",
+			score.Total, score.Max, score.OIDrop, score.Skew, score.VolSpike, score.Funding)
+
 		log.Printf("[ENGINE] Dispatching Telegram alert (combined impact %s)...", humanUSD(totalImpactUSDT))
 		telegram.DispatchTelegramAlert(token, chatID, msg)
+
+		// D3: confirmation only starts for meaningful (absolute-score) setups. A
+		// fresh qualifying T0 cancels any pending confirmation (§6.1).
+		if score.QualifiesForConfirmation(cfg) {
+			log.Printf("[ENGINE] T0 score %d >= gate %d — starting candle-sync confirmation.",
+				score.Total, cfg.StartConfirmationMinScore)
+			confMgr.Trigger(T0Snapshot{
+				FlushRangeHigh: bybit.max, // liquidation range top on PrimaryExchange (Bybit)
+				BaselinePrice:  bybitLast,
+				T0:             time.Now().UTC(),
+			})
+		}
 	}
 }
