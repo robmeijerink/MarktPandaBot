@@ -7,6 +7,7 @@
 package volume
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"sort"
@@ -111,7 +112,11 @@ func aggregatedBucketVol(fetchers []klineFetcher, client *http.Client, bucket ti
 	for _, f := range fetchers {
 		klines, err := f.fetch(client, 3)
 		if err != nil {
-			log.Printf("[VOLUME] Live poll: %s fetch error: %v", f.name, err)
+			// A paused REST circuit already logged its cause once; don't repeat it
+			// every cycle.
+			if !errors.Is(err, bybit.ErrRESTPaused) {
+				log.Printf("[VOLUME] Live poll: %s fetch error: %v", f.name, err)
+			}
 			continue
 		}
 		for _, k := range klines {
@@ -133,6 +138,9 @@ func fetchWithRetry(client *http.Client, f klineFetcher, cfg aggregator.Config) 
 		klines, err := f.fetch(client, cfg.BufferSize)
 		if err == nil {
 			return klines
+		}
+		if errors.Is(err, bybit.ErrRESTPaused) {
+			return nil // breaker already open; retrying is pointless and noisy
 		}
 		lastErr = err
 		log.Printf("[VOLUME] Warm boot: %s attempt %d/%d failed: %v", f.name, attempt, cfg.KlineMaxRetries, err)

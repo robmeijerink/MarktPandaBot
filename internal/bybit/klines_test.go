@@ -86,6 +86,8 @@ func TestBybitFetchClose(t *testing.T) {
 }
 
 func TestBybitFetchKlinesHTTPError(t *testing.T) {
+	bybitREST.reset()
+	defer bybitREST.reset()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))

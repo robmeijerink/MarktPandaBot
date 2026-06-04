@@ -45,6 +45,9 @@ type bybitKlineResp struct {
 // is excluded so only completed buckets enter the ring. It falls back across
 // bybitRESTBases so a geo-block on one host does not kill the volume baseline.
 func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
+	if !bybitREST.allow() {
+		return nil, ErrRESTPaused // breaker open; skip the doomed request and the log noise
+	}
 	if limit > bybitKlineLimit {
 		limit = bybitKlineLimit
 	}
@@ -68,8 +71,10 @@ func FetchKlines(client *http.Client, limit int) ([]aggregator.Kline, error) {
 		break
 	}
 	if lastErr != nil {
+		bybitREST.onFailure(lastErr)
 		return nil, lastErr
 	}
+	bybitREST.onSuccess()
 
 	currentBucket := time.Now().UTC().Truncate(5 * time.Minute)
 	out := make([]aggregator.Kline, 0, len(parsed.Result.List))
