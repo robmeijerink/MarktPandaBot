@@ -32,6 +32,11 @@ type Config struct {
 	MinLeadSeconds    int // 180 — if next close is sooner, target the one after
 	CandleIntervalSec int // 300
 
+	// ReclaimWatchCandles: after the early flow read, if price has not yet
+	// reclaimed the flush high, keep watching this many further candles for a
+	// reclaim before sending the final verdict. 0 disables the second stage.
+	ReclaimWatchCandles int // 3
+
 	// Warm boot (§4)
 	KlineFetchTimeoutSec int // 10
 	KlineMaxRetries      int // 3
@@ -47,22 +52,34 @@ func DefaultConfig() Config {
 		BufferSize:      288,
 		MinBufferFill:   144,
 
-		WeightOIDrop:   3,
-		WeightSkew:     2,
+		// Equal weights: with no backtest proving one signal is more predictive,
+		// weighting them equally is the honest default. Critically it avoids a
+		// "mandatory signal" — at the old 3/2/1/1, OI Drop alone could veto the
+		// gate (max-without-OI was 4 < gate 5), so 3-of-4 passing setups never
+		// qualified. Now the gate is a plain majority vote (see below).
+		WeightOIDrop:   1,
+		WeightSkew:     1,
 		WeightVolSpike: 1,
 		WeightFunding:  1,
 
-		OIDropPct:            2.5,
+		// OIDropPct aligned to StrongOISignalFraction (1.5%). The previous 2.5%
+		// was higher than the largest real capitulation observed (~2.13%, see the
+		// OI-signal comment in engine.go), so OI Drop could essentially never fire.
+		OIDropPct:            1.5,
 		SkewPct:              90.0,
 		VolSpikeMult:         5.0,
 		FundingNegThreshold:  0.0,
 		FundingTrendDropPct:  30.0,
 		FundingLookbackHours: 1.0,
 
-		StartConfirmationMinScore: 5,
+		// Gate = 3 of 4 signals (with MaxT0Score 4). The follow-up fires when a
+		// majority of confirmations agree, so no single signal is required and a
+		// stale/flat OI feed cannot block an otherwise-strong setup.
+		StartConfirmationMinScore: 3,
 
-		MinLeadSeconds:    180,
-		CandleIntervalSec: 300,
+		MinLeadSeconds:      180,
+		CandleIntervalSec:   300,
+		ReclaimWatchCandles: 3,
 
 		KlineFetchTimeoutSec: 10,
 		KlineMaxRetries:      3,

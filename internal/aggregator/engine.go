@@ -307,7 +307,21 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config,
 		}
 		prevOKXOI = curOKXOI
 		prevBybitOI = curBybitOI
+		hadBaseline := oiBaseline // false only on the very first cycle
 		oiBaseline = true
+
+		// OI heartbeat: logs every cycle (incl. idle) so a frozen OI feed is
+		// obvious. OKX's open-interest channel pushes ~every 3s, so its Δ should
+		// rarely be exactly $0 — a persistent "Δ +$0" here means the feed is stale,
+		// not that the market is flat. (Funding moves slowly, so its small Δ is
+		// normal.) The first cycle has no baseline yet, so it is not flagged.
+		oiStale := ""
+		if hadBaseline && okxOIDelta == 0 && bybitOIDelta == 0 {
+			oiStale = "  ⚠️ both OI deltas exactly $0 — check OI feeds"
+		}
+		log.Printf("[ENGINE] OI heartbeat: OKX %s (Δ %s) | Bybit %s (Δ %s) | funding OKX %.4f%% Bybit %.4f%%%s",
+			humanUSD(curOKXOI), signedUSD(okxOIDelta), humanUSD(curBybitOI), signedUSD(bybitOIDelta),
+			curOKXFunding*100, curBybitFunding*100, oiStale)
 
 		data := aggregator.ExtractAndClear()
 		if len(data) == 0 {
@@ -364,34 +378,18 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config,
 			oiChangePct = combinedOIDelta / combinedOI * 100
 		}
 
+		// Title + signal stay outside the code fence so bold/emoji render; the
+		// per-venue tables go inside one ``` block so every column lines up.
 		msg := fmt.Sprintf(
 			"🚨 *LIQUIDATION ALERT*\n\n"+
-				"*%s* (OI %+.2f%%)\n\n"+
-				"_⚠️ Combined (Bybit & OKX): ~%s liquidated in the past 5 minutes._\n"+
-				"📊 BTC $%.0f (%+.1f%% 24h)\n\n"+
-				"📍 *BYBIT* (Total: ~%s / %.2f ₿)\n"+
-				"🔴 Longs: ~%s   🟢 Shorts: ~%s\n"+
-				"Ord: %d   Biggest: ~%s %s\n"+
-				"Rng: %.0f - %.0f\n"+
-				"Fund: %.4f%%   OI: %s (Δ %s)\n\n"+
-				"🌐 *OKX* (Total: ~%s / %.2f ₿)\n"+
-				"🔴 Longs: ~%s   🟢 Shorts: ~%s\n"+
-				"Ord: %d   Biggest: ~%s %s\n"+
-				"Rng: %.0f - %.0f\n"+
-				"Fund: %.4f%%   OI: %s (Δ %s)",
-			signalLabel, oiChangePct,
+				"*%s*\n\n"+
+				"📈 OI %+.2f%%  ·  BTC $%s  ·  %+.1f%% 24h\n\n"+
+				"⚠️ Combined ~%s liquidated in the last 5m\n\n"+
+				"```\n%s\n\n%s\n```",
+			signalLabel, oiChangePct, comma(bybitLast), bybitPctDisplay,
 			humanUSD(totalImpactUSDT),
-			bybitLast, bybitPctDisplay,
-			humanUSD(bybit.volUSDT), bybit.volBTC,
-			humanUSD(bybit.longUSDT), humanUSD(bybit.shortUSDT),
-			bybit.count, humanUSD(bybit.biggestUSDT), bybit.biggestSide,
-			bybit.min, bybit.max,
-			curBybitFunding*100, humanUSD(curBybitOI), signedUSD(bybitOIDelta),
-			humanUSD(okx.volUSDT), okx.volBTC,
-			humanUSD(okx.longUSDT), humanUSD(okx.shortUSDT),
-			okx.count, humanUSD(okx.biggestUSDT), okx.biggestSide,
-			okx.min, okx.max,
-			curOKXFunding*100, humanUSD(curOKXOI), signedUSD(okxOIDelta),
+			formatExchangeBlock("📍", "BYBIT", bybit, curBybitFunding, curBybitOI, bybitOIDelta),
+			formatExchangeBlock("🌐", "OKX", okx, curOKXFunding, curOKXOI, okxOIDelta),
 		)
 
 		// ─── Two-stage scoring injection (upgrade.md §4–§6) ──────────────────
@@ -412,8 +410,22 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config,
 		})
 		msg += FormatSetupMatrix(cfg, score)
 
-		log.Printf("[ENGINE] T0 Setup Matrix: score %d/%d (OI=%t Skew=%t VolSpike=%t Funding=%t).",
-			score.Total, score.Max, score.OIDrop, score.Skew, score.VolSpike, score.Funding)
+		// Log the RAW value behind each signal next to its threshold, so the gate
+		// can be calibrated from the real distribution of events rather than
+		// guessed. "vol" is n/a until the ring has MinBufferFill samples.
+		longShare := longLiqShare(combinedLongUSDT, combinedShortUSDT)
+		volRatioStr := "n/a(warming)"
+		if medianOK && medianVol > 0 {
+			volRatioStr = fmt.Sprintf("%.1fx", bucketVol/medianVol)
+		}
+		log.Printf("[ENGINE] T0 signals: score %d/%d | "+
+			"OI Δ %.2f%% (bar ≤-%.1f) %s | skew %.1f%% (bar ≥%.0f) %s | "+
+			"vol %s (bar ≥%.0fx) %s | funding %.4f%% (bar ≤%.0f) %s",
+			score.Total, score.Max,
+			oiChangePct, cfg.OIDropPct, passMark(score.OIDrop),
+			longShare, cfg.SkewPct, passMark(score.Skew),
+			volRatioStr, cfg.VolSpikeMult, passMark(score.VolSpike),
+			curBybitFunding*100, cfg.FundingNegThreshold, passMark(score.Funding))
 
 		log.Printf("[ENGINE] Dispatching Telegram alert (combined impact %s)...", humanUSD(totalImpactUSDT))
 		telegram.DispatchTelegramAlert(token, chatID, msg)

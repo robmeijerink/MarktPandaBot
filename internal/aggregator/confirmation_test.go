@@ -6,27 +6,101 @@ import (
 	"time"
 )
 
-func TestComputeVerdict(t *testing.T) {
+func TestEarlyVerdict(t *testing.T) {
 	tests := []struct {
-		name    string
-		reclaim bool
-		cvd     metricState
-		spot    metricState
-		want    string
+		name     string
+		closeOK  bool
+		reclaim  bool
+		cvd      metricState
+		spot     metricState
+		watching bool
+		want     string
 	}{
-		{"reclaim fail => not confirmed", false, metricPass, metricPass, "Not confirmed"},
-		{"reclaim + cvd => confirmed", true, metricPass, metricFail, "Reversal confirmed"},
-		{"reclaim + spot => confirmed", true, metricFail, metricPass, "Reversal confirmed"},
-		{"reclaim + cvd NA but spot pass => confirmed", true, metricNA, metricPass, "Reversal confirmed"},
-		{"reclaim only, both fail => absorbed", true, metricFail, metricFail, "Absorbed — weak"},
-		{"reclaim only, both NA => absorbed", true, metricNA, metricNA, "Absorbed — weak"},
+		{"reclaim + cvd => confirmed", true, true, metricPass, metricFail, false, "Reversal confirmed"},
+		{"reclaim + spot => confirmed", true, true, metricFail, metricPass, false, "Reversal confirmed"},
+		{"reclaim only, both fail => absorbed", true, true, metricFail, metricFail, false, "Absorbed — weak"},
+		{"reclaim only, both NA => absorbed", true, true, metricNA, metricNA, false, "Absorbed — weak"},
+		// No reclaim yet but watching => never a premature negative.
+		{"no reclaim + watching => pending", true, false, metricPass, metricPass, true, "Pending — watching reclaim"},
+		{"no close + watching => pending", false, false, metricNA, metricNA, true, "Pending — watching reclaim"},
+		// Watch disabled => the old immediate verdicts.
+		{"no reclaim, no watch => not confirmed", true, false, metricPass, metricPass, false, "Not confirmed"},
+		{"no close, no watch => inconclusive", false, false, metricPass, metricPass, false, "Inconclusive — no candle close"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := computeVerdict(tc.reclaim, tc.cvd, tc.spot); got != tc.want {
-				t.Fatalf("computeVerdict = %q, want %q", got, tc.want)
+			if got := earlyVerdict(tc.closeOK, tc.reclaim, tc.cvd, tc.spot, tc.watching); got != tc.want {
+				t.Fatalf("earlyVerdict = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestConfirmationReclaimWatchConfirms(t *testing.T) {
+	fc := newFakeClock()
+	sent := make(chan string, 8)
+	cfg := DefaultConfig()
+	cfg.ReclaimWatchCandles = 3
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	target := confirmationTarget(now, cfg)
+	const flush = 65000.0
+	reclaimCandle := target // the candle that closes one interval after target
+
+	cm := NewConfirmationManager(cfg, NewFlowTracker(),
+		func(bs time.Time) (float64, bool) {
+			if bs.Equal(reclaimCandle) {
+				return 70000, true // reclaims above the flush high
+			}
+			return 60000, true // first candle stays below
+		},
+		func(msg string) { sent <- msg },
+	)
+	cm.now = func() time.Time { return now }
+	cm.after = fc.after
+
+	cm.Trigger(T0Snapshot{FlushRangeHigh: flush, T0: now})
+
+	// Stage 1 early read: price below flush, so pending + watching.
+	(<-fc.calls) <- now
+	early := <-sent
+	if !strings.Contains(early, "EARLY READ") || !strings.Contains(early, "Pending") {
+		t.Fatalf("early read not pending: %q", early)
+	}
+	if !strings.Contains(early, "Watching up to 3") {
+		t.Fatalf("early read missing watch notice: %q", early)
+	}
+
+	// Stage 2, first watched candle reclaims.
+	(<-fc.calls) <- now
+	final := <-sent
+	if !strings.Contains(final, "RECLAIM CONFIRMED") {
+		t.Fatalf("expected RECLAIM CONFIRMED, got: %q", final)
+	}
+}
+
+func TestConfirmationReclaimWatchTimesOut(t *testing.T) {
+	fc := newFakeClock()
+	sent := make(chan string, 8)
+	cfg := DefaultConfig()
+	cfg.ReclaimWatchCandles = 2
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+
+	cm := NewConfirmationManager(cfg, NewFlowTracker(),
+		func(time.Time) (float64, bool) { return 60000, true }, // always below flush
+		func(msg string) { sent <- msg },
+	)
+	cm.now = func() time.Time { return now }
+	cm.after = fc.after
+
+	cm.Trigger(T0Snapshot{FlushRangeHigh: 65000, T0: now})
+
+	(<-fc.calls) <- now // stage 1
+	<-sent              // early read (pending)
+	(<-fc.calls) <- now // watch candle 1 — no reclaim
+	(<-fc.calls) <- now // watch candle 2 — no reclaim => final
+	final := <-sent
+	if !strings.Contains(final, "NOT CONFIRMED") || !strings.Contains(final, "watched 2 candles") {
+		t.Fatalf("expected timeout NOT CONFIRMED, got: %q", final)
 	}
 }
 
@@ -73,7 +147,7 @@ func TestConfirmationCancellationOnlySecondFires(t *testing.T) {
 	ch2 <- cm.now()
 	select {
 	case msg := <-sent:
-		if !strings.Contains(msg, "2222") {
+		if !strings.Contains(msg, "2,222") {
 			t.Fatalf("fired message is not from the second trigger: %q", msg)
 		}
 	case <-time.After(2 * time.Second):

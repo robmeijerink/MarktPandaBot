@@ -114,32 +114,38 @@ func FormatSetupMatrix(cfg Config, s SetupScore) string {
 		conviction = "HIGH CONVICTION"
 	}
 
-	volScore := "0"
-	volMark := mark(s.VolSpike, s.VolWarming)
-	if s.VolSpike {
-		volScore = fmt.Sprintf("%d", cfg.WeightVolSpike)
-	} else if s.VolWarming {
+	volScore := scoreCell(s.VolSpike, cfg.WeightVolSpike)
+	if s.VolWarming {
 		volScore = "0 (warming up)"
 	}
 
+	// Each row: <glyph> <label padded> <condition padded> <score>. The glyph is
+	// the only emoji and is identical-width across rows, so the columns to its
+	// right stay aligned inside the code fence.
+	row := func(glyph, label, cond, score string) string {
+		return fmt.Sprintf("%s %-10s%-13s%s\n", glyph, label, cond, score)
+	}
+
 	var b strings.Builder
-	b.WriteString("\n------------------------\n")
+	b.WriteString("\n\n```\n")
 	b.WriteString("📊 SETUP MATRIX (T0)\n")
-	b.WriteString(fmt.Sprintf("%s OI Drop (>=%.1f%%)   : %s\n", mark(s.OIDrop, false), cfg.OIDropPct, scoreCell(s.OIDrop, cfg.WeightOIDrop)))
-	b.WriteString(fmt.Sprintf("%s Skew (>=%.0f%% long)   : %s\n", mark(s.Skew, false), cfg.SkewPct, scoreCell(s.Skew, cfg.WeightSkew)))
-	b.WriteString(fmt.Sprintf("%s Vol Spike (>=%.0fx) : %s\n", volMark, cfg.VolSpikeMult, volScore))
-	b.WriteString(fmt.Sprintf("%s Funding Flip               : %s\n", mark(s.Funding, false), scoreCell(s.Funding, cfg.WeightFunding)))
-	b.WriteString(fmt.Sprintf("\nScore: %d/%d   (%s)\n", s.Total, s.Max, conviction))
+	b.WriteString(row(mark(s.OIDrop, false), "OI Drop", fmt.Sprintf("≥%.1f%% drop", cfg.OIDropPct), scoreCell(s.OIDrop, cfg.WeightOIDrop)))
+	b.WriteString(row(mark(s.Skew, false), "Skew", fmt.Sprintf("≥%.0f%% long", cfg.SkewPct), scoreCell(s.Skew, cfg.WeightSkew)))
+	b.WriteString(row(mark(s.VolSpike, s.VolWarming), "Vol Spike", fmt.Sprintf("≥%.0f× median", cfg.VolSpikeMult), volScore))
+	b.WriteString(row(mark(s.Funding, false), "Funding", "flip ≤0", scoreCell(s.Funding, cfg.WeightFunding)))
+	b.WriteString("──────────────────────\n")
+	b.WriteString(fmt.Sprintf("Score %d / %d   ·   %s\n", s.Total, s.Max, conviction))
+	b.WriteString("```")
 	if s.QualifiesForConfirmation(cfg) {
-		b.WriteString("⏳ Monitoring absorption window…")
+		b.WriteString("\n⏳ Monitoring absorption window…")
 	}
 	return b.String()
 }
 
-// scoreCell renders an item's contributed score: its weight on pass, 0 on fail.
+// scoreCell renders an item's contributed score: +weight on pass, 0 on fail.
 func scoreCell(pass bool, weight int) string {
 	if pass {
-		return fmt.Sprintf("%d", weight)
+		return fmt.Sprintf("+%d", weight)
 	}
 	return "0"
 }

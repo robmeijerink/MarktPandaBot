@@ -18,6 +18,15 @@ const (
 	metricNA
 )
 
+// confirmSettleDelay is how long past the candle close we wait before fetching it,
+// giving the REST feed time to publish the closed candle. confirmCloseRetries is a
+// safety net if it is still momentarily unavailable.
+const (
+	confirmSettleDelay  = 10 * time.Second
+	confirmCloseRetries = 3
+	confirmRetryWait    = 2 * time.Second
+)
+
 func (m metricState) glyph() string {
 	switch m {
 	case metricPass:
@@ -93,68 +102,29 @@ func (c *ConfirmationManager) Trigger(snap T0Snapshot) {
 	go c.run(ctx, snap, myGen)
 }
 
-// run waits for the target candle to close, then evaluates and sends — unless it
-// is cancelled first, in which case it exits silently (§7).
+// run drives the two-stage confirmation: an early flow read at the first closed
+// candle, then — only if price has not reclaimed yet — a watch over the next few
+// candles for a reclaim. Every wait is cancelable; a newer T0 ends the whole run
+// silently (§7).
 func (c *ConfirmationManager) run(ctx context.Context, snap T0Snapshot, myGen int) {
+	defer c.clearCancel(myGen)
+
 	target := confirmationTarget(c.now(), c.cfg)
-	wait := target.Sub(c.now())
-	if wait < 0 {
-		wait = 0
+	interval := time.Duration(c.cfg.CandleIntervalSec) * time.Second
+
+	// ── Stage 1: early flow read at the first closed candle. The settle delay
+	// lets the exchange publish the just-closed candle before we fetch it. ──
+	if !c.waitUntil(ctx, target.Add(confirmSettleDelay)) {
+		return
 	}
-
-	select {
-	case <-ctx.Done():
-		return // superseded by a newer T0; send nothing
-	case <-c.after(wait):
-	}
-
-	c.evaluateAndSend(snap, target)
-
-	// Natural completion: clear our cancelFunc so a stale cancel is never called,
-	// but only if a newer Trigger has not already replaced it.
-	c.mu.Lock()
-	if c.gen == myGen {
-		c.cancel = nil
-	}
-	c.mu.Unlock()
-}
-
-// evaluateAndSend computes the three confirmation metrics for the just-closed
-// target candle and dispatches the message.
-func (c *ConfirmationManager) evaluateAndSend(snap T0Snapshot, target time.Time) {
-	// The candle that closes at `target` opened one interval earlier; that is the
-	// fully-closed candle we evaluate.
-	candleStart := target.Add(-time.Duration(c.cfg.CandleIntervalSec) * time.Second)
-
-	// Price Reclaim (required): close on PrimaryExchange > captured flush high.
-	closePx, ok := c.fetchClose(candleStart)
+	candleStart := target.Add(-interval)
+	closePx, ok := c.fetchCloseWithRetry(candleStart)
 	reclaim := ok && closePx > snap.FlushRangeHigh
+	cvd, spot := c.evalFlow(candleStart)
 
-	// CVD Inflow (optional): net signed perp taker volume > 0.
-	cvd := metricNA
-	if c.flow.PerpActive() {
-		if c.flow.PerpCVD(candleStart) > 0 {
-			cvd = metricPass
-		} else {
-			cvd = metricFail
-		}
-	}
-
-	// Spot-vs-Perp (optional): net spot taker-buy volume > 0.
-	spot := metricNA
-	if c.flow.SpotActive() {
-		if c.flow.SpotNet(candleStart) > 0 {
-			spot = metricPass
-		} else {
-			spot = metricFail
-		}
-	}
-
-	verdict := computeVerdict(reclaim, cvd, spot)
-	minutesWaited := int(math.Round(target.Sub(snap.T0).Minutes()))
-
-	msg := formatConfirmation(confirmationView{
-		minutesWaited:  minutesWaited,
+	watching := !reclaim && c.cfg.ReclaimWatchCandles > 0
+	c.send(formatConfirmation(confirmationView{
+		minutesWaited:  int(math.Round(target.Sub(snap.T0).Minutes())),
 		candleStart:    candleStart,
 		closePx:        closePx,
 		closeOK:        ok,
@@ -162,23 +132,132 @@ func (c *ConfirmationManager) evaluateAndSend(snap T0Snapshot, target time.Time)
 		reclaim:        reclaim,
 		cvd:            cvd,
 		spot:           spot,
-		verdict:        verdict,
-	})
-	c.send(msg)
+		verdict:        earlyVerdict(ok, reclaim, cvd, spot, watching),
+		watching:       watching,
+		watchCandles:   c.cfg.ReclaimWatchCandles,
+	}))
+	if !watching {
+		return // price already reclaimed, or the watch is disabled
+	}
+
+	// ── Stage 2: watch subsequent candles for a price reclaim. ──
+	var lastClose float64
+	var lastOK bool
+	for i := 1; i <= c.cfg.ReclaimWatchCandles; i++ {
+		candleClose := target.Add(time.Duration(i) * interval)
+		if !c.waitUntil(ctx, candleClose.Add(confirmSettleDelay)) {
+			return
+		}
+		cs := candleClose.Add(-interval)
+		lastClose, lastOK = c.fetchCloseWithRetry(cs)
+		if lastOK && lastClose > snap.FlushRangeHigh {
+			c.send(formatReclaimResult(reclaimResult{
+				reclaimed:      true,
+				minutesWaited:  int(math.Round(candleClose.Sub(snap.T0).Minutes())),
+				candleStart:    cs,
+				closePx:        lastClose,
+				closeOK:        true,
+				flushRangeHigh: snap.FlushRangeHigh,
+				candlesWatched: i,
+			}))
+			return
+		}
+	}
+	// Watched the full window with no reclaim.
+	finalClose := target.Add(time.Duration(c.cfg.ReclaimWatchCandles) * interval)
+	c.send(formatReclaimResult(reclaimResult{
+		reclaimed:      false,
+		minutesWaited:  int(math.Round(finalClose.Sub(snap.T0).Minutes())),
+		closePx:        lastClose,
+		closeOK:        lastOK,
+		flushRangeHigh: snap.FlushRangeHigh,
+		candlesWatched: c.cfg.ReclaimWatchCandles,
+	}))
 }
 
-// computeVerdict applies the §6 verdict rule:
-//   - Reclaim fails                              => "Not confirmed"
-//   - Reclaim passes AND (CVD OR Spot passes)    => "Reversal confirmed"
-//   - Reclaim passes, both flow signals fail/NA  => "Absorbed — weak"
-func computeVerdict(reclaim bool, cvd, spot metricState) string {
-	if !reclaim {
-		return "Not confirmed"
+// waitUntil blocks until time t (per the injectable clock) or cancellation. It
+// returns false if the run was cancelled.
+func (c *ConfirmationManager) waitUntil(ctx context.Context, t time.Time) bool {
+	wait := t.Sub(c.now())
+	if wait < 0 {
+		wait = 0
 	}
-	if cvd == metricPass || spot == metricPass {
-		return "Reversal confirmed"
+	select {
+	case <-ctx.Done():
+		return false
+	case <-c.after(wait):
+		return true
 	}
-	return "Absorbed — weak"
+}
+
+// clearCancel drops the stored cancelFunc on natural completion, but only if a
+// newer Trigger has not already replaced it.
+func (c *ConfirmationManager) clearCancel(myGen int) {
+	c.mu.Lock()
+	if c.gen == myGen {
+		c.cancel = nil
+	}
+	c.mu.Unlock()
+}
+
+// evalFlow reads the two optional flow signals for the given candle.
+func (c *ConfirmationManager) evalFlow(candleStart time.Time) (cvd, spot metricState) {
+	cvd, spot = metricNA, metricNA
+	if c.flow.PerpActive() {
+		if c.flow.PerpCVD(candleStart) > 0 {
+			cvd = metricPass
+		} else {
+			cvd = metricFail
+		}
+	}
+	if c.flow.SpotActive() {
+		if c.flow.SpotNet(candleStart) > 0 {
+			spot = metricPass
+		} else {
+			spot = metricFail
+		}
+	}
+	return cvd, spot
+}
+
+// earlyVerdict is the verdict on the FIRST candle (the early flow read):
+//   - Reclaim passes AND (CVD OR Spot passes)    => "Reversal confirmed" (final)
+//   - Reclaim passes, both flow signals fail/NA  => "Absorbed — weak" (final)
+//   - Reclaim not yet passed, watch enabled      => "Pending — watching reclaim"
+//   - Reclaim not passed, no watch, no close     => "Inconclusive — no candle close"
+//   - Reclaim not passed, no watch, close present => "Not confirmed"
+//
+// When watching, we never say "Not confirmed" prematurely — the final negative is
+// only issued by the stage-2 watch after the price has had several candles to
+// reclaim. This is what prevents a slow reversal from being mislabelled early.
+func earlyVerdict(closeOK, reclaim bool, cvd, spot metricState, watching bool) string {
+	if reclaim {
+		if cvd == metricPass || spot == metricPass {
+			return "Reversal confirmed"
+		}
+		return "Absorbed — weak"
+	}
+	if watching {
+		return "Pending — watching reclaim"
+	}
+	if !closeOK {
+		return "Inconclusive — no candle close"
+	}
+	return "Not confirmed"
+}
+
+// fetchCloseWithRetry retries the close fetch a few times; the just-closed candle
+// can take a moment to appear on the REST feed even after the settle delay.
+func (c *ConfirmationManager) fetchCloseWithRetry(bucketStart time.Time) (float64, bool) {
+	for attempt := 0; attempt < confirmCloseRetries; attempt++ {
+		if px, ok := c.fetchClose(bucketStart); ok {
+			return px, true
+		}
+		if attempt < confirmCloseRetries-1 {
+			time.Sleep(confirmRetryWait)
+		}
+	}
+	return 0, false
 }
 
 type confirmationView struct {
@@ -191,44 +270,124 @@ type confirmationView struct {
 	cvd            metricState
 	spot           metricState
 	verdict        string
+	watching       bool // a stage-2 reclaim watch will follow this early read
+	watchCandles   int
 }
 
 // formatConfirmation renders the independent confirmation message (§7). The lead
 // glyph reflects the verdict rather than always being ✅, so a "Not confirmed"
 // result does not masquerade as a success.
 func formatConfirmation(v confirmationView) string {
-	lead := "❌"
+	// Header reflects the outcome: a non-confirmation never reads "CONFIRMATION".
+	lead, status := "❌", "NO CONFIRMATION"
 	switch v.verdict {
 	case "Reversal confirmed":
-		lead = "✅"
+		lead, status = "✅", "CONFIRMATION"
 	case "Absorbed — weak":
-		lead = "🟡"
+		lead, status = "🟡", "WEAK CONFIRMATION"
+	case "Inconclusive — no candle close":
+		lead, status = "⚪", "NO CONFIRMATION"
+	case "Pending — watching reclaim":
+		lead, status = "⏳", "EARLY READ"
 	}
 
 	closeStr := "n/a"
 	if v.closeOK {
-		closeStr = fmt.Sprintf("$%.2f", v.closePx)
+		closeStr = "$" + comma2(v.closePx)
 	}
 
+	// When the close could not be fetched, the reclaim was not evaluated — show ⚪
+	// (N/A), not ❌, so it does not look like a measured failure.
 	reclaimGlyph := metricFail
-	if v.reclaim {
+	switch {
+	case !v.closeOK:
+		reclaimGlyph = metricNA
+	case v.reclaim:
 		reclaimGlyph = metricPass
 	}
 
+	// Signal agreement: how many of the EVALUABLE signals (N/A excluded) pointed to
+	// a reversal. This is a transparent tally, NOT a backtested probability — it
+	// surfaces cases like "price didn't reclaim, but both flow signals agreed",
+	// which a binary verdict would otherwise bury.
+	passed, evaluable := 0, 0
+	for _, m := range []metricState{reclaimGlyph, v.cvd, v.spot} {
+		if m == metricNA {
+			continue
+		}
+		evaluable++
+		if m == metricPass {
+			passed++
+		}
+	}
+	tail := ""
+	if evaluable > 0 {
+		pct := int(math.Round(float64(passed) / float64(evaluable) * 100))
+		tail = fmt.Sprintf("\nSignals: %d/%d agree (%d%%)", passed, evaluable, pct)
+	}
+	if v.watching {
+		tail += fmt.Sprintf("\n⏳ Watching up to %d more candles for a reclaim…", v.watchCandles)
+	}
+
 	// Candle labelled by its open time (UTC), per the 5-minute candle convention.
+	// The matrix rows go in a code fence so the columns align; each row's only
+	// emoji is the leading glyph, identical-width across rows.
+	row := func(glyph, label, detail string) string {
+		return fmt.Sprintf("%s %-14s%s\n", glyph, label, detail)
+	}
 	return fmt.Sprintf(
-		"%s CONFIRMATION (T+%dm, candle %s UTC)\n"+
-			"Pair: BTC/USDT | Close: %s\n"+
-			"📊 Confirmation Matrix:\n"+
-			"%s Price Reclaim (> $%.2f)\n"+
-			"%s CVD Inflow (net positive)\n"+
-			"%s Spot vs Perp (spot leading)\n\n"+
-			"Verdict: %s",
-		lead, v.minutesWaited, v.candleStart.UTC().Format("15:04"),
+		"%s %s · T+%dm · candle %s UTC\n\n"+
+			"```\n"+
+			"Pair   BTC/USDT\n"+
+			"Close  %s\n"+
+			"%s%s%s"+
+			"──────────────────────\n"+
+			"Verdict: %s%s\n"+
+			"```",
+		lead, status, v.minutesWaited, v.candleStart.UTC().Format("15:04"),
 		closeStr,
-		reclaimGlyph.glyph(), v.flushRangeHigh,
-		v.cvd.glyph(),
-		v.spot.glyph(),
-		v.verdict,
+		row(reclaimGlyph.glyph(), "Price Reclaim", "> $"+comma2(v.flushRangeHigh)),
+		row(v.cvd.glyph(), "CVD Inflow", "net positive"),
+		row(v.spot.glyph(), "Spot vs Perp", "spot leading"),
+		v.verdict, tail,
 	)
+}
+
+// reclaimResult is the outcome of the stage-2 reclaim watch (notification 2).
+type reclaimResult struct {
+	reclaimed      bool
+	minutesWaited  int
+	candleStart    time.Time // the candle that reclaimed (when reclaimed)
+	closePx        float64
+	closeOK        bool
+	flushRangeHigh float64
+	candlesWatched int
+}
+
+// formatReclaimResult renders the final reclaim-watch message (the second, later
+// notification). It is only sent when the early read was still pending.
+func formatReclaimResult(r reclaimResult) string {
+	if r.reclaimed {
+		return fmt.Sprintf(
+			"✅ RECLAIM CONFIRMED · T+%dm · candle %s UTC\n\n"+
+				"```\n"+
+				"Pair   BTC/USDT\n"+
+				"Close  $%s\n"+
+				"Reclaimed flush high $%s after %d candle(s).\n"+
+				"```",
+			r.minutesWaited, r.candleStart.UTC().Format("15:04"),
+			comma2(r.closePx), comma2(r.flushRangeHigh), r.candlesWatched)
+	}
+	lastClose := "n/a"
+	if r.closeOK {
+		lastClose = "$" + comma2(r.closePx)
+	}
+	return fmt.Sprintf(
+		"❌ NOT CONFIRMED · T+%dm · watched %d candles\n\n"+
+			"```\n"+
+			"Pair   BTC/USDT\n"+
+			"Price never closed back above $%s.\n"+
+			"Last close %s\n"+
+			"```",
+		r.minutesWaited, r.candlesWatched, comma2(r.flushRangeHigh), lastClose)
 }

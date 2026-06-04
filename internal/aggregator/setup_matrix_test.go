@@ -25,12 +25,12 @@ func TestScoreSetupEachItem(t *testing.T) {
 		{
 			name:      "only OI drop",
 			in:        SetupInputs{OIChangePct: -3, LongLiqUSDT: 1, ShortLiqUSDT: 1, FundingRate: 0.0001, BucketVol: 1, MedianVol: 1, VolMedianOK: true},
-			wantTotal: 3, wantOI: true,
+			wantTotal: 1, wantOI: true,
 		},
 		{
 			name:      "only skew",
 			in:        SetupInputs{OIChangePct: 0, LongLiqUSDT: 95, ShortLiqUSDT: 5, FundingRate: 0.0001, BucketVol: 1, MedianVol: 1, VolMedianOK: true},
-			wantTotal: 2, wantSkew: true,
+			wantTotal: 1, wantSkew: true,
 		},
 		{
 			name:      "only vol spike",
@@ -45,7 +45,7 @@ func TestScoreSetupEachItem(t *testing.T) {
 		{
 			name:      "full house = MaxT0Score",
 			in:        SetupInputs{OIChangePct: -2.5, LongLiqUSDT: 90, ShortLiqUSDT: 10, FundingRate: 0, BucketVol: 50, MedianVol: 10, VolMedianOK: true},
-			wantTotal: 7, wantOI: true, wantSkew: true, wantVol: true, wantFund: true,
+			wantTotal: 4, wantOI: true, wantSkew: true, wantVol: true, wantFund: true,
 		},
 	}
 
@@ -82,34 +82,38 @@ func TestVolSpikeWarmingScoresZero(t *testing.T) {
 }
 
 func TestD3GateOnAbsoluteScore(t *testing.T) {
-	cfg := DefaultConfig() // StartConfirmationMinScore = 5
+	cfg := DefaultConfig() // StartConfirmationMinScore = 3 (3-of-4 majority)
 
-	// Score 5 (OI 3 + Skew 2) qualifies on the absolute score even though it is
-	// well under the 7/7 max (i.e. NOT a ratio gate).
+	// 3 of 4 signals (Skew + Vol + Funding) qualifies WITHOUT OI Drop — the key
+	// fix: no single signal is mandatory. Evaluated on the absolute score, not a
+	// ratio of Max.
 	qualifying := ScoreSetup(cfg, SetupInputs{
-		OIChangePct: -3, LongLiqUSDT: 95, ShortLiqUSDT: 5,
-		FundingRate: 0.001, BucketVol: 1, MedianVol: 1, VolMedianOK: true,
+		OIChangePct: 0, LongLiqUSDT: 95, ShortLiqUSDT: 5, // OI fails, Skew passes
+		FundingRate: -0.00001, BucketVol: 50, MedianVol: 10, VolMedianOK: true,
 	})
-	if qualifying.Total != 5 {
-		t.Fatalf("precondition: Total = %d, want 5", qualifying.Total)
+	if qualifying.Total != 3 {
+		t.Fatalf("precondition: Total = %d, want 3", qualifying.Total)
+	}
+	if qualifying.OIDrop {
+		t.Fatal("precondition: OI Drop should be failing in this case")
 	}
 	if !qualifying.QualifiesForConfirmation(cfg) {
-		t.Fatal("score 5 did not qualify (D3 gate broken)")
+		t.Fatal("3-of-4 setup did not qualify (gate broken / OI still mandatory)")
 	}
 	if !strings.Contains(FormatSetupMatrix(cfg, qualifying), "HIGH CONVICTION") {
 		t.Fatal("qualifying setup not labelled HIGH CONVICTION")
 	}
 
-	// Score 4 (OI 3 + Vol 1) does NOT qualify, and shows no monitoring line.
+	// Only 2 of 4 signals does NOT qualify, and shows no monitoring line.
 	below := ScoreSetup(cfg, SetupInputs{
-		OIChangePct: -3, LongLiqUSDT: 1, ShortLiqUSDT: 1,
-		FundingRate: 0.001, BucketVol: 50, MedianVol: 10, VolMedianOK: true,
+		OIChangePct: -3, LongLiqUSDT: 1, ShortLiqUSDT: 1, // OI passes, Skew fails
+		FundingRate: 0.001, BucketVol: 50, MedianVol: 10, VolMedianOK: true, // Vol passes, Funding fails
 	})
-	if below.Total != 4 {
-		t.Fatalf("precondition: Total = %d, want 4", below.Total)
+	if below.Total != 2 {
+		t.Fatalf("precondition: Total = %d, want 2", below.Total)
 	}
 	if below.QualifiesForConfirmation(cfg) {
-		t.Fatal("score 4 qualified (D3 gate broken)")
+		t.Fatal("2-of-4 setup qualified (gate too loose)")
 	}
 	out := FormatSetupMatrix(cfg, below)
 	if !strings.Contains(out, "LOW") {
