@@ -65,10 +65,29 @@ A fresh qualifying alert cancels any pending confirmation and starts a new one, 
 
 > ⚠️ **The default weights and thresholds are reasonable starting points, not a validated edge.** They should be backtested against historical flushes before the scores and verdicts are traded on. Because every value lives in one config block, that tuning needs no code changes.
 
+## 📐 21/200 SMA Retest Alerts (Independent Module)
+
+A separate, fully self-contained module watches for **pullback / retest entries** on the 3-minute timeframe. It is completely decoupled from the liquidation engine above — it keeps its own state, streams its own candles, and sends its own messages. It shares no data with the scoring layer and cannot affect the base liquidation alerts.
+
+The idea is mechanical, not pattern-matching: a 21/200 SMA cross sets the trend, then the module waits for price to pull back and make a **bar-close touch of the 21 SMA** (dynamic support for longs, resistance for shorts). A pullback all the way to the **200 SMA** invalidates the setup.
+
+**How it works:**
+
+1. **Trend (regime).** A golden cross (21 SMA above 200 SMA) arms **long** retest setups; a death cross arms **short** setups. Both directions are watched. There is no alert on the cross itself — only on the subsequent touch.
+2. **Bar-close touch.** A long touch fires only when the candle's low reaches the 21 SMA (within a small tolerance band) **and the candle closes back at or above it** — a wick that pierces the SMA but closes below is rejected. Shorts mirror this. This close-on-the-right-side filter is the whole point of evaluating on closed bars.
+3. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
+4. **Anti-spam.** After a touch fires, no further touch is sent until price closes back outside the tolerance band (debounce), or — optionally — a single touch is sent per regime (first-only).
+5. **Warm boot.** On startup the module silently hydrates ~300 closed 3m candles from REST and establishes the current regime **without firing a historical alert**; the first qualifying live bar can still trigger.
+
+**Data source.** The 3m candles come from the primary exchange (Bybit perp BTC/USDT by default) over a WebSocket kline subscription, with a REST poll as an automatic fallback if the socket goes quiet — so a dropped connection or a geo-blocked REST host (it transparently fails over to Bybit's `bytick.com` mirror) does not silence the feed.
+
+> ⚠️ **3m is fast and noisy, and this is plumbing for a setup signal — not a validated edge.** Expect more alerts than on higher timeframes, and note that runaway trends that never retest the 21 SMA are missed by design. Backtest the long and short legs separately before acting on them. Every threshold lives in the module's config block.
+
 ## ✨ Key Features
 
 - **Zero Alert Fatigue:** 5-minute rolling windows and configurable volume confluence filters ensure you only get notified during major volatility blocks.
 - **Two-Stage Conviction Scoring:** Every alert is graded by a tunable Setup Matrix, and only high-conviction setups trigger a delayed, candle-synced confirmation message — separating "a flush happened" from "the flush actually reversed."
+- **21/200 SMA Retest Module:** A fully independent add-on that watches 3-minute candles for bar-close retests of the 21 SMA after a 21/200 cross (both long and short), with a 200-SMA invalidation guard, anti-spam debounce, and a WebSocket-primary / REST-fallback candle feed.
 - **Stateful Context Engine:** Doesn't just report the crash; it reports the context. Real-time Open Interest shifts ($\Delta$) and Funding Rates are attached to every alert to help identify Short Squeezes, long-squeezes, and trap setups.
 - **Smartwatch Optimized:** Alerts are meticulously formatted using minimalist layouts, specific bold markers, and clean line breaks, allowing you to read Volume, Range, Funding, and OI delta at a single glance on your wrist.
 - **DevOps Ready:** Compiled as a 100% statically linked Linux binary (`CGO_ENABLED=0`). Extremely lightweight footprint (~30MB RAM), perfect for hosting on cloud resources or micro-instances like a worker node.
@@ -117,6 +136,20 @@ Verdict: Reversal confirmed
 ```
 
 > The exact thresholds shown in the matrix labels and the score denominator are rendered from your configuration at runtime; the values above are illustrative. A `⚪` marks a signal that was unavailable and excluded from the verdict.
+
+The independent SMA retest module sends its own message, with a distinct `📐` prefix so it stays readable in the same feed:
+
+```markdown
+📐 SMA RETEST — LONG (3m)
+BTC/USDT  @ 63704.40
+21 SMA: 63702.10   |   200 SMA: 63180.50
+Touch low: 63689.20   (stop reference, not advice)
+Room to 200 SMA: 0.82%
+Regime: 14 bars since golden cross
+Bar-close confirmed touch of the 21 SMA (support held).
+```
+
+> Short setups mirror this (death cross, `Touch high`, "resistance held"). The values above are illustrative.
 
 ## 🚀 Setup & Configuration
 
@@ -167,5 +200,6 @@ All tunable behavior lives in configuration blocks inside the internal packages 
 - **Confluence thresholds** for the base liquidation alert (per-exchange volume gating, regime sensitivity).
 - **Setup Matrix** signal weights and pass thresholds, plus the conviction cutoff that gates the follow-up confirmation.
 - **Confirmation timing** (candle interval and minimum lead time) and **warm-boot** parameters (history depth, fetch timeout/retries).
+- **SMA Retest module** (separate config block): timeframe and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), direction filter (both/long/short), the re-arm/anti-spam mode, and warm-boot depth.
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and backtest before relying on the scores or verdicts.

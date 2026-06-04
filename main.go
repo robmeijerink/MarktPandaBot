@@ -9,6 +9,7 @@ import (
 	"github.com/robmeijerink/MarktPandaBot/internal/aggregator"
 	"github.com/robmeijerink/MarktPandaBot/internal/bybit"
 	"github.com/robmeijerink/MarktPandaBot/internal/okx"
+	"github.com/robmeijerink/MarktPandaBot/internal/smaretest"
 	"github.com/robmeijerink/MarktPandaBot/internal/telegram"
 	"github.com/robmeijerink/MarktPandaBot/internal/volume"
 )
@@ -80,6 +81,14 @@ func main() {
 
 	// Decision Engine
 	go aggregator.RunConfluenceEngine(aggr, state, cfg, ring, confMgr, telegramToken, chatID)
+
+	// 21/200 SMA retest module (upgrade.md) — fully independent add-on. This is the
+	// single permitted wiring call: it warm-boots its own 3m regime and streams its
+	// own 3m klines (WS primary, REST fallback), sending its own Telegram messages.
+	// It shares no state with the engine above.
+	go smaretest.Run(smaretest.DefaultConfig(), func(msg string) {
+		telegram.DispatchTelegramAlert(telegramToken, chatID, msg)
+	})
 
 	// Health Check for Docker/Google Cloud Engine
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
