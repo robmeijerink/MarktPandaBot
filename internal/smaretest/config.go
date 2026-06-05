@@ -68,7 +68,7 @@ func DefaultConfig() Config {
 		TouchTolPct:          0.05,
 		ATRPeriod:            14,
 		ATRMult:              0.25,
-		ReArmMode:            ReArmDebounce,
+		ReArmMode:            ReArmFirstOnly,
 		EmitInvalidation:     false,
 		BarCloseGraceSec:     5,
 		KlineFetchTimeoutSec: 10,

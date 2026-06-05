@@ -130,7 +130,8 @@ func TestInvalidation(t *testing.T) {
 func TestReArmDebounce(t *testing.T) {
 	band := 0.05
 
-	cfg := DefaultConfig() // debounce
+	cfg := DefaultConfig()
+	cfg.ReArmMode = ReArmDebounce
 	m, sent := testMachine(t, cfg)
 	m.regime, m.armed, m.reArmed = regimeLong, true, true
 
