@@ -15,7 +15,7 @@ func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
 			"📐 SMA RETEST — LONG (%s)\n"+
 				"%s  @ %.2f\n"+
 				"21 SMA: %.2f   |   200 SMA: %.2f\n"+
-				"Touch low: %.2f   (stop reference, not advice)\n"+
+				"Touch low: %.2f\n"+
 				"Room to 200 SMA: %.2f%%\n"+
 				"Regime: %d bars since golden cross\n"+
 				"Bar-close confirmed touch of the 21 SMA (support held).",
@@ -26,7 +26,7 @@ func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
 		"📐 SMA RETEST — SHORT (%s)\n"+
 			"%s  @ %.2f\n"+
 			"21 SMA: %.2f   |   200 SMA: %.2f\n"+
-			"Touch high: %.2f   (stop reference, not advice)\n"+
+			"Touch high: %.2f\n"+
 			"Room to 200 SMA: %.2f%%\n"+
 			"Regime: %d bars since death cross\n"+
 			"Bar-close confirmed touch of the 21 SMA (resistance held).",

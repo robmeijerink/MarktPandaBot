@@ -18,7 +18,7 @@ type Config struct {
 	WeightVolSpike int // 1 — requires vol >= VolSpikeMult * median
 	WeightFunding  int // 1 — requires funding sign/trend pass
 
-	OIDropPct            float64 // 2.5
+	OIDropPct            float64 // 0.7
 	SkewPct              float64 // 90.0
 	VolSpikeMult         float64 // 5.0
 	FundingNegThreshold  float64 // 0.0  — pass if current funding <= this
@@ -62,10 +62,16 @@ func DefaultConfig() Config {
 		WeightVolSpike: 1,
 		WeightFunding:  1,
 
-		// OIDropPct aligned to StrongOISignalFraction (1.5%). The previous 2.5%
-		// was higher than the largest real capitulation observed (~2.13%, see the
-		// OI-signal comment in engine.go), so OI Drop could essentially never fire.
-		OIDropPct:            1.5,
+		// OIDropPct aligned to MinOISignalFraction (0.7%) — the bar at which the
+		// engine itself first calls a directional OI move ("Potential REVERSAL",
+		// see engine.go). The earlier 1.5% (StrongOISignalFraction, "Likely") sat
+		// just under the largest capitulation ever seen (~2.13%) and a 1.5% drop on
+		// the ~$5.4B combined OI means ~$81M flushed in one 5-min window — never
+		// observed in practice (live windows top out ~0.54%), so OI Drop could not
+		// fire. With the 3-of-4 gate that silently made the other three signals
+		// mandatory; at 0.7% OI Drop is achievable on a real reversal while staying
+		// well above the <0.1% noise of quiet windows.
+		OIDropPct:            MinOISignalFraction * 100, // 0.7% — same bar as the engine's directional-move test
 		SkewPct:              90.0,
 		VolSpikeMult:         5.0,
 		FundingNegThreshold:  0.0,
