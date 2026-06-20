@@ -91,6 +91,97 @@ func (in *indicators) atr(period int) (float64, bool) {
 	return sum / float64(period), true
 }
 
+// flagWindow describes the consolidation ("flag") leading up to the most recent
+// bar. It is the price range over a lookback window, split into an earlier and a
+// recent half, so the state machine can tell whether volatility is contracting
+// into a tight flag before a 21 SMA touch — the CryptoLifer "model" entry premise.
+type flagWindow struct {
+	fullRange    float64 // high-low over the whole window
+	earlierRange float64 // high-low over the older half
+	recentRange  float64 // high-low over the newer half
+	refPrice     float64 // last close in the window, for percent math
+	poleMove     float64 // signed close-to-close move of the impulse preceding the flag
+	ok           bool    // false when there is not enough history (for BOTH pole and flag)
+}
+
+// flag measures the consolidation over the `lookback` bars ending JUST BEFORE the
+// most recent bar. The last stored bar is the touch candidate; the flag is the
+// run-up that precedes it, so it is excluded here. ok is false until enough bars
+// exist (warm boot fills the window long before this matters).
+func (in *indicators) flag(lookback, poleLookback int) flagWindow {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	n := len(in.bars)
+	end := n - 2 // bar before the touch candidate
+	start := end - lookback + 1
+	if lookback < 2 || poleLookback < 1 || start < 0 {
+		return flagWindow{}
+	}
+	// The pole is the impulse run-up that leads directly into the flag: the
+	// poleLookback bars ENDING on the bar just before the flag begins.
+	poleEnd := start - 1
+	poleStart := poleEnd - poleLookback + 1
+	if poleStart < 0 {
+		return flagWindow{} // not enough history for the pole that precedes the flag
+	}
+	half := lookback / 2
+	rng := func(lo, hi int) float64 {
+		mn, mx := in.bars[lo].Low, in.bars[lo].High
+		for i := lo + 1; i <= hi; i++ {
+			mn = math.Min(mn, in.bars[i].Low)
+			mx = math.Max(mx, in.bars[i].High)
+		}
+		return mx - mn
+	}
+	return flagWindow{
+		fullRange:    rng(start, end),
+		earlierRange: rng(start, start+half-1),
+		recentRange:  rng(end-half+1, end),
+		refPrice:     in.bars[end].Close,
+		poleMove:     in.bars[poleEnd].Close - in.bars[poleStart].Close,
+		ok:           true,
+	}
+}
+
+// tightFlag reports whether the flag qualifies as a tight, contracting consolidation
+// per the config: the recent half must be tight right now (height <= FlagMaxRangePct
+// of price) AND getting tighter (recent half <= FlagContractionRatio of the earlier
+// half). A degenerate flat earlier half counts as maximally contracted.
+func tightFlag(cfg Config, fw flagWindow) bool {
+	if !fw.ok || fw.refPrice <= 0 {
+		return false
+	}
+	if fw.recentRange/fw.refPrice*100 > cfg.FlagMaxRangePct {
+		return false // not tight enough yet
+	}
+	if fw.earlierRange <= 0 {
+		return fw.recentRange <= 0 // both flat => maximally tight
+	}
+	return fw.recentRange <= cfg.FlagContractionRatio*fw.earlierRange
+}
+
+// validPole reports whether a genuine flag POLE precedes the consolidation for the
+// given regime — the piece that distinguishes a real flag from quiet sideways
+// drift. Three conditions, all required: (1) the pole is a real impulse, not noise
+// (close-to-close move >= FlagMinPolePct of price); (2) it dwarfs the flag it leads
+// into (|move| >= FlagMinPoleRatio * full flag range); and (3) it runs WITH the
+// trend (up into a long, down into a short). The magnitude floor is checked before
+// the sign so a flat window (move ~ 0) is rejected outright rather than being
+// "aligned" to short by sign convention.
+func validPole(cfg Config, fw flagWindow, regime int) bool {
+	if !fw.ok || fw.refPrice <= 0 {
+		return false
+	}
+	move := math.Abs(fw.poleMove)
+	if move/fw.refPrice*100 < cfg.FlagMinPolePct {
+		return false // no real impulse — this is drift/chop, not a pole
+	}
+	if move < cfg.FlagMinPoleRatio*fw.fullRange {
+		return false // pole does not dominate the flag — not flag geometry
+	}
+	return sign2(fw.poleMove) == regime // pole must run in the trend direction
+}
+
 // smaAt computes the simple moving average of closes ending at endIdx (inclusive)
 // over `period` bars. ok is false if there is not enough history.
 func smaAt(bars []Bar, period, endIdx int) (float64, bool) {

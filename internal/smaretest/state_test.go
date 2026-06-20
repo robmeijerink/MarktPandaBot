@@ -16,9 +16,11 @@ func testMachine(t *testing.T, cfg Config) (*machine, *[]string) {
 func bar(o, h, l, c float64) Bar { return Bar{Open: o, High: h, Low: l, Close: c} }
 
 // ctx assembles a barCtx with explicit indicator readings so the decision logic
-// can be tested without engineering 200-bar SMA series.
+// can be tested without engineering 200-bar SMA series. flagTight and flagPole both
+// default to true so touch tests exercise the geometry; the flag/pole gates have
+// their own dedicated tests.
 func ctx(fast, slow, prevFast, prevSlow, band float64, b Bar) barCtx {
-	return barCtx{fast: fast, slow: slow, prevFast: prevFast, prevSlow: prevSlow, havePrev: true, band: band, bar: b}
+	return barCtx{fast: fast, slow: slow, prevFast: prevFast, prevSlow: prevSlow, havePrev: true, band: band, bar: b, flagTight: true, flagPole: true}
 }
 
 // Test 1: cross detection — a sign flip of (SMA21-SMA200) sets the regime; no flip
@@ -198,6 +200,7 @@ func TestWarmBootSilentThenFire(t *testing.T) {
 	cfg.SlowPeriod = 3
 	cfg.WarmBootBars = 10
 	cfg.TouchTolPct = 0.05
+	cfg.RequireTightFlag = false // this test exercises warm-boot firing, not the flag gate
 
 	ind := newIndicators(cfg)
 	var sent []string
@@ -229,6 +232,87 @@ func TestWarmBootSilentThenFire(t *testing.T) {
 	m.processBar(live)
 	if len(sent) != 1 {
 		t.Fatalf("first qualifying live bar should fire exactly once, got %d", len(sent))
+	}
+}
+
+// Test 7: tight-flag gate — a valid geometric touch does NOT fire unless the
+// preceding consolidation is a tight flag, and a suppressed touch leaves the setup
+// ARMED so a later tight-flag touch still fires.
+func TestTightFlagGate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ReArmMode = ReArmDebounce // so the first touch does not disarm the regime
+	band := 0.05
+	touch := bar(100.02, 100.06, 99.97, 100.01) // low<=fast+band, close>=fast
+
+	// flagTight=false: geometric touch is suppressed and the arm is NOT consumed.
+	m, sent := testMachine(t, cfg)
+	m.regime, m.armed, m.reArmed = regimeLong, true, true
+	c := ctx(100, 90, 100, 90, band, touch)
+	c.flagTight = false
+	m.decide(c)
+	if len(*sent) != 0 {
+		t.Fatalf("touch without a tight flag must not fire, got %d", len(*sent))
+	}
+	if !m.reArmed {
+		t.Fatalf("suppressed touch must leave the setup armed to keep waiting")
+	}
+
+	// Same machine, next qualifying bar WITH a tight flag => fires.
+	m.decide(ctx(100, 90, 100, 90, band, touch)) // ctx() sets flagTight=true
+	if len(*sent) != 1 {
+		t.Fatalf("tight-flag touch should fire exactly once, got %d", len(*sent))
+	}
+
+	// RequireTightFlag=false: the gate is bypassed entirely.
+	cfg2 := DefaultConfig()
+	cfg2.RequireTightFlag = false
+	m2, sent2 := testMachine(t, cfg2)
+	m2.regime, m2.armed, m2.reArmed = regimeLong, true, true
+	c2 := ctx(100, 90, 100, 90, band, touch)
+	c2.flagTight = false
+	m2.decide(c2)
+	if len(*sent2) != 1 {
+		t.Fatalf("with RequireTightFlag=false the touch should fire, got %d", len(*sent2))
+	}
+}
+
+// Test 8: pole gate in decide — a tight flag with no pole is suppressed (and leaves
+// the setup armed); with a pole it fires; RequireTightFlag=false bypasses both.
+func TestPoleGate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ReArmMode = ReArmDebounce // so a suppressed touch does not disarm the regime
+	band := 0.05
+	touch := bar(100.02, 100.06, 99.97, 100.01) // low<=fast+band, close>=fast
+
+	// Tight flag but NO pole => suppressed, arm preserved so it keeps waiting.
+	m, sent := testMachine(t, cfg)
+	m.regime, m.armed, m.reArmed = regimeLong, true, true
+	c := ctx(100, 90, 100, 90, band, touch) // flagTight=true from ctx()
+	c.flagPole = false
+	m.decide(c)
+	if len(*sent) != 0 {
+		t.Fatalf("a tight flag with no pole must not fire, got %d", len(*sent))
+	}
+	if !m.reArmed {
+		t.Fatalf("suppressed (no-pole) touch must leave the setup armed")
+	}
+
+	// Next qualifying bar WITH a pole => fires exactly once.
+	m.decide(ctx(100, 90, 100, 90, band, touch)) // ctx() sets flagPole=true
+	if len(*sent) != 1 {
+		t.Fatalf("pole + tight-flag touch should fire exactly once, got %d", len(*sent))
+	}
+
+	// RequireTightFlag=false bypasses the pole gate too.
+	cfg2 := DefaultConfig()
+	cfg2.RequireTightFlag = false
+	m2, sent2 := testMachine(t, cfg2)
+	m2.regime, m2.armed, m2.reArmed = regimeLong, true, true
+	c2 := ctx(100, 90, 100, 90, band, touch)
+	c2.flagTight, c2.flagPole = false, false
+	m2.decide(c2)
+	if len(*sent2) != 1 {
+		t.Fatalf("with RequireTightFlag=false the touch should fire, got %d", len(*sent2))
 	}
 }
 

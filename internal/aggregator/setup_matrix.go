@@ -2,6 +2,7 @@ package aggregator
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -18,6 +19,25 @@ type SetupInputs struct {
 	BucketVol    float64 // most recent completed aggregated bucket quote-volume
 	MedianVol    float64 // ring median
 	VolMedianOK  bool    // false while the ring is still warming up
+
+	// Adaptive references (computed by the engine from trailing rings). Used only
+	// when cfg.UseAdaptiveThresholds; each *RankOK=false falls back to the fixed bar.
+	VolPctileRank    float64 // fraction of ring samples below BucketVol (0..1)
+	VolRankOK        bool
+	OIDropPctileRank float64 // fraction of recent windows with a smaller OI drop than this
+	OIDropRankOK     bool
+
+	// CVD absorption signal (#1). PerpCVD is the net signed perp taker notional
+	// (USD) over the flush window; a reversal wants it to OPPOSE the flush.
+	PerpCVD       float64
+	PerpActive    bool    // false => CVD renders N/A and scores 0
+	LongsDominant bool    // flush direction: longs dominant => reversal-up bias
+	CVDPctileRank float64 // fraction of recent |CVD| below |PerpCVD|
+	CVDRankOK     bool
+
+	// Funding flip/trend (#3). FundingPrev is funding ~FundingLookbackHours ago.
+	FundingPrev       float64
+	FundingHasHistory bool
 }
 
 // SetupScore is the scored result of one T0 evaluation.
@@ -26,10 +46,14 @@ type SetupScore struct {
 	Skew     bool
 	VolSpike bool
 	Funding  bool
+	CVD      bool
 
 	// VolWarming is true when Vol Spike could not be evaluated because the ring
 	// has not reached MinBufferFill. It scores 0 and renders as warming-up.
 	VolWarming bool
+	// CVDNA is true when the perp flow stream was unavailable; CVD scores 0 and
+	// renders as N/A (⚪) rather than a measured fail.
+	CVDNA bool
 
 	Total int
 	Max   int
@@ -45,30 +69,34 @@ func longLiqShare(longUSDT, shortUSDT float64) float64 {
 	return longUSDT / total * 100
 }
 
-// ScoreSetup evaluates the four T0 items against the configured weights/thresholds.
+// ScoreSetup evaluates the five T0 items against the configured weights/thresholds.
 //
-//   - OI Drop : OIChangePct <= -OIDropPct                      => WeightOIDrop
-//   - Skew    : long-liq share >= SkewPct                      => WeightSkew
-//   - Vol Spike: VolMedianOK && BucketVol >= VolSpikeMult*median => WeightVolSpike
-//   - Funding : FundingRate <= FundingNegThreshold             => WeightFunding
+//   - OI Drop : OI fell past the bar (fixed % or adaptive percentile) => WeightOIDrop
+//   - Skew    : long-liq share >= SkewPct                             => WeightSkew
+//   - Vol Spike: vol past the bar (fixed ×median or adaptive percentile) => WeightVolSpike
+//   - Funding : funding <= threshold OR a sharp downtrend             => WeightFunding
+//   - CVD     : perp taker flow OPPOSES the flush (absorption)        => WeightCVD
 //
-// Funding uses only the absolute-sign test: funding history is not tracked, so the
-// FundingTrendDropPct path of §4 is unavailable. The absolute test is always
-// available at alert time, so Funding is never N/A and Max stays at MaxT0Score (7).
+// Adaptive gates fall back to their fixed bar until the trailing ring has warmed up,
+// so the score is always defined. CVD is the only item that can be N/A (perp stream
+// down); like Vol-warming it then scores 0 while Max stays at MaxT0Score.
 func ScoreSetup(cfg Config, in SetupInputs) SetupScore {
 	s := SetupScore{Max: cfg.MaxT0Score}
 
-	s.OIDrop = in.OIChangePct <= -cfg.OIDropPct
+	s.OIDrop = scoreOIDrop(cfg, in)
 	s.Skew = longLiqShare(in.LongLiqUSDT, in.ShortLiqUSDT) >= cfg.SkewPct
 
 	if !in.VolMedianOK || in.MedianVol <= 0 {
 		s.VolWarming = true
 		s.VolSpike = false
+	} else if cfg.UseAdaptiveThresholds && in.VolRankOK {
+		s.VolSpike = in.VolPctileRank >= cfg.VolSpikePctile
 	} else {
 		s.VolSpike = in.BucketVol >= cfg.VolSpikeMult*in.MedianVol
 	}
 
-	s.Funding = in.FundingRate <= cfg.FundingNegThreshold
+	s.Funding = scoreFunding(cfg, in)
+	s.CVD, s.CVDNA = scoreCVD(cfg, in)
 
 	if s.OIDrop {
 		s.Total += cfg.WeightOIDrop
@@ -82,7 +110,53 @@ func ScoreSetup(cfg Config, in SetupInputs) SetupScore {
 	if s.Funding {
 		s.Total += cfg.WeightFunding
 	}
+	if s.CVD {
+		s.Total += cfg.WeightCVD
+	}
 	return s
+}
+
+// scoreOIDrop passes when OI fell hard enough: in adaptive mode the drop must rank
+// in the top (1-OIDropPctile) of recent windows AND actually be a drop; otherwise
+// it must clear the fixed OIDropPct bar.
+func scoreOIDrop(cfg Config, in SetupInputs) bool {
+	if cfg.UseAdaptiveThresholds && in.OIDropRankOK {
+		return in.OIChangePct < 0 && in.OIDropPctileRank >= cfg.OIDropPctile
+	}
+	return in.OIChangePct <= -cfg.OIDropPct
+}
+
+// scoreFunding passes on the absolute sign test (funding <= threshold) OR, when
+// FundingFlipEnabled and history exists, on a sharp downtrend from a positive level
+// even while still positive — longs capitulating, anticipating the flip (§4).
+func scoreFunding(cfg Config, in SetupInputs) bool {
+	if in.FundingRate <= cfg.FundingNegThreshold {
+		return true
+	}
+	if cfg.FundingFlipEnabled && in.FundingHasHistory && in.FundingPrev > 0 {
+		drop := (in.FundingPrev - in.FundingRate) / in.FundingPrev
+		if drop >= cfg.FundingTrendDropPct/100 {
+			return true
+		}
+	}
+	return false
+}
+
+// scoreCVD passes when perp taker flow OPPOSES the liquidation direction by a
+// meaningful amount (buyers absorbing a long flush / sellers into a short squeeze).
+// na is true when the perp stream was inactive, in which case it scores 0.
+func scoreCVD(cfg Config, in SetupInputs) (pass, na bool) {
+	if !in.PerpActive {
+		return false, true
+	}
+	opposes := (in.LongsDominant && in.PerpCVD > 0) || (!in.LongsDominant && in.PerpCVD < 0)
+	if !opposes {
+		return false, false
+	}
+	if cfg.UseAdaptiveThresholds && in.CVDRankOK {
+		return in.CVDPctileRank >= cfg.CVDPctile, false
+	}
+	return math.Abs(in.PerpCVD) >= cfg.CVDMinNotionalUSDT, false
 }
 
 // QualifiesForConfirmation reports the D3 gate: confirmation starts only when the
@@ -129,10 +203,20 @@ func FormatSetupMatrix(cfg Config, s SetupScore) string {
 	var b strings.Builder
 	b.WriteString("\n\n```\n")
 	b.WriteString("📊 SETUP MATRIX (T0)\n")
-	b.WriteString(row(mark(s.OIDrop, false), "OI Drop", fmt.Sprintf("≥%.1f%% drop", cfg.OIDropPct), scoreCell(s.OIDrop, cfg.WeightOIDrop)))
+	// Condition text reflects the active mode: adaptive gates show their percentile,
+	// fixed gates show the multiple/threshold.
+	oiCond := fmt.Sprintf("≥%.1f%% drop", cfg.OIDropPct)
+	volCond := fmt.Sprintf("≥%.0f× median", cfg.VolSpikeMult)
+	if cfg.UseAdaptiveThresholds {
+		oiCond = fmt.Sprintf("top %.0f%% drop", (1-cfg.OIDropPctile)*100)
+		volCond = fmt.Sprintf("top %.0f%% vol", (1-cfg.VolSpikePctile)*100)
+	}
+
+	b.WriteString(row(mark(s.OIDrop, false), "OI Drop", oiCond, scoreCell(s.OIDrop, cfg.WeightOIDrop)))
 	b.WriteString(row(mark(s.Skew, false), "Skew", fmt.Sprintf("≥%.0f%% long", cfg.SkewPct), scoreCell(s.Skew, cfg.WeightSkew)))
-	b.WriteString(row(mark(s.VolSpike, s.VolWarming), "Vol Spike", fmt.Sprintf("≥%.0f× median", cfg.VolSpikeMult), volScore))
-	b.WriteString(row(mark(s.Funding, false), "Funding", "flip ≤0", scoreCell(s.Funding, cfg.WeightFunding)))
+	b.WriteString(row(mark(s.VolSpike, s.VolWarming), "Vol Spike", volCond, volScore))
+	b.WriteString(row(mark(s.Funding, false), "Funding", "flip/trend ≤0", scoreCell(s.Funding, cfg.WeightFunding)))
+	b.WriteString(row(mark(s.CVD, s.CVDNA), "CVD", "absorb flush", scoreCell(s.CVD, cfg.WeightCVD)))
 	b.WriteString("──────────────────────\n")
 	b.WriteString(fmt.Sprintf("Score %d / %d   ·   %s\n", s.Total, s.Max, conviction))
 	b.WriteString("```")

@@ -82,6 +82,24 @@ func (r *VolumeRing) Median() (float64, bool) {
 	return (vals[n/2-1] + vals[n/2]) / 2, true
 }
 
+// Rank returns the fraction of held samples strictly less than v (0..1) — the
+// percentile of v within the ring. ok is false while fill < minFill (still
+// warming), so the adaptive Vol Spike gate falls back to the fixed multiplier.
+func (r *VolumeRing) Rank(v float64) (float64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.fill < r.minFill || r.fill == 0 {
+		return 0, false
+	}
+	below := 0
+	for i := 0; i < r.fill; i++ {
+		if r.data[i] < v {
+			below++
+		}
+	}
+	return float64(below) / float64(r.fill), true
+}
+
 // Latest returns the most recently added (most recent completed) bucket volume.
 // This is the "current bucket volume" compared against Median() at T0. ok is false
 // when the ring is empty.

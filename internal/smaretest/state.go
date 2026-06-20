@@ -38,6 +38,10 @@ type barCtx struct {
 	havePrev           bool
 	band               float64
 	bar                Bar
+	flagTight          bool    // the preceding consolidation is a tight, contracting flag
+	flagPole           bool    // a real, trend-aligned pole precedes that consolidation
+	flagRangePct       float64 // recent-half flag height as % of price (for the message)
+	flagPolePct        float64 // signed pole height as % of price (for the message)
 }
 
 // processBar is the live entry point: push the bar, recompute indicators, and run
@@ -58,14 +62,26 @@ func (m *machine) processBar(b Bar) {
 			band = m.cfg.ATRMult * atr
 		}
 	}
+	// Measure the consolidation that precedes this (touch-candidate) bar so the
+	// decision can require a tight, contracting flag — the model's entry premise.
+	fw := m.ind.flag(m.cfg.FlagLookback, m.cfg.PoleLookback)
+	flagRangePct, flagPolePct := 0.0, 0.0
+	if fw.ok && fw.refPrice > 0 {
+		flagRangePct = fw.recentRange / fw.refPrice * 100
+		flagPolePct = fw.poleMove / fw.refPrice * 100
+	}
 	m.decide(barCtx{
-		fast:     fast,
-		slow:     slow,
-		prevFast: m.prevFast,
-		prevSlow: m.prevSlow,
-		havePrev: m.havePrev,
-		band:     band,
-		bar:      b,
+		fast:         fast,
+		slow:         slow,
+		prevFast:     m.prevFast,
+		prevSlow:     m.prevSlow,
+		havePrev:     m.havePrev,
+		band:         band,
+		bar:          b,
+		flagTight:    tightFlag(m.cfg, fw),
+		flagPole:     validPole(m.cfg, fw, m.regime),
+		flagRangePct: flagRangePct,
+		flagPolePct:  flagPolePct,
 	})
 	// Remember this bar's SMAs so the next bar can detect a sign flip.
 	m.prevFast, m.prevSlow, m.havePrev = fast, slow, true
@@ -111,20 +127,23 @@ func (m *machine) decide(c barCtx) {
 
 	// (c) Touch detection — evaluated against the arm state AS OF BAR START, so a
 	// single bar can never both re-arm and fire. The wick-out filter requires the
-	// close back on the correct side of the 21 SMA, not just a wick through it.
+	// close back on the correct side of the 21 SMA, not just a wick through it. The
+	// touch only counts as an entry when it is preceded by a tight, contracting flag
+	// (the model's premise); a geometric touch that fails the flag gate leaves the
+	// setup ARMED so it keeps waiting for the real entry instead of being consumed.
 	armedAtStart := m.reArmed
 	if armedAtStart {
-		if m.regime == regimeLong && c.bar.Low <= c.fast+c.band && c.bar.Close >= c.fast {
-			if m.cfg.longEnabled() {
+		longTouch := m.regime == regimeLong && c.bar.Low <= c.fast+c.band && c.bar.Close >= c.fast
+		shortTouch := m.regime == regimeShort && c.bar.High >= c.fast-c.band && c.bar.Close <= c.fast
+		// The model entry is a pole FOLLOWED BY a tight, contracting flag — both halves
+		// are required. A tight consolidation with no pole is just chop reverting to the
+		// mean and must not fire (that was the false-trigger bug).
+		flagOK := !m.cfg.RequireTightFlag || (c.flagTight && c.flagPole)
+		if (longTouch || shortTouch) && flagOK {
+			if longTouch && m.cfg.longEnabled() {
 				m.send(buildTouch(m.cfg, regimeLong, c, m.barsSinceCross))
 			}
-			m.reArmed = false
-			if m.cfg.ReArmMode == ReArmFirstOnly {
-				m.disarm()
-			}
-		}
-		if m.regime == regimeShort && c.bar.High >= c.fast-c.band && c.bar.Close <= c.fast {
-			if m.cfg.shortEnabled() {
+			if shortTouch && m.cfg.shortEnabled() {
 				m.send(buildTouch(m.cfg, regimeShort, c, m.barsSinceCross))
 			}
 			m.reArmed = false

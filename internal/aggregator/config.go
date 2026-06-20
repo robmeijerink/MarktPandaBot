@@ -13,10 +13,11 @@ type Config struct {
 	MinBufferFill   int      // 144  — below this, Vol Spike scores 0 (still warming)
 
 	// T0 Setup Matrix weights (TUNABLE)
-	WeightOIDrop   int // 3 — requires OI drop >= OIDropPct
-	WeightSkew     int // 2 — requires long-liquidation share >= SkewPct
-	WeightVolSpike int // 1 — requires vol >= VolSpikeMult * median
+	WeightOIDrop   int // 1 — requires OI drop >= OIDropPct (or adaptive percentile)
+	WeightSkew     int // 1 — requires long-liquidation share >= SkewPct
+	WeightVolSpike int // 1 — requires vol >= VolSpikeMult * median (or adaptive percentile)
 	WeightFunding  int // 1 — requires funding sign/trend pass
+	WeightCVD      int // 1 — requires perp CVD to OPPOSE the flush (absorption)
 
 	OIDropPct            float64 // 0.7
 	SkewPct              float64 // 90.0
@@ -25,8 +26,28 @@ type Config struct {
 	FundingTrendDropPct  float64 // 30.0 — OR pass if funding fell this % over lookback
 	FundingLookbackHours float64 // 1.0  — lookback for the trend test (NOT 5 min)
 
-	MaxT0Score                int // 7 (3+2+1+1) — DISPLAY denominator; keep in sync with weights
-	StartConfirmationMinScore int // 5 (TUNABLE) — D3 gate, evaluated on the ABSOLUTE score
+	// CVD absorption signal (TUNABLE). Perp CVD is the net signed taker flow during
+	// the flush window; a reversal needs flow to OPPOSE the liquidation direction
+	// (buyers stepping in under a long flush / sellers into a short squeeze).
+	CVDMinNotionalUSDT float64 // 250000 — fixed-mode floor on |CVD| to count as real absorption
+
+	// Adaptive thresholds (TUNABLE). When true, Vol/OI/CVD are gated on their
+	// trailing distribution (percentile rank over recent windows) instead of fixed
+	// multiples, so one setting holds across calm and volatile regimes. Each gate
+	// falls back to its fixed bar until its history ring has warmed up.
+	UseAdaptiveThresholds bool    // true
+	VolSpikePctile        float64 // 0.90 — Vol Spike passes at/above this percentile of the ring
+	OIDropPctile          float64 // 0.90 — OI Drop passes when the drop ranks this high among recent windows
+	CVDPctile             float64 // 0.80 — CVD absorption must be this significant vs recent |CVD|
+	AdaptiveMinSamples    int     // 48 — min history before an adaptive gate engages (4h of 5-min windows)
+
+	// Funding flip/trend (TUNABLE). When true, Funding also passes on a sharp
+	// downtrend even while still positive (longs capitulating, anticipating a flip),
+	// using FundingTrendDropPct over FundingLookbackHours from a funding history ring.
+	FundingFlipEnabled bool // true
+
+	MaxT0Score                int // sum of weights — DISPLAY denominator; kept in sync below
+	StartConfirmationMinScore int // 3 (TUNABLE) — D3 gate, evaluated on the ABSOLUTE score
 
 	// Candle-sync (§6)
 	MinLeadSeconds    int // 180 — if next close is sooner, target the one after
@@ -40,6 +61,13 @@ type Config struct {
 	// Warm boot (§4)
 	KlineFetchTimeoutSec int // 10
 	KlineMaxRetries      int // 3
+
+	// Outcome logging (TUNABLE). Records each alert's T0 features and its forward
+	// return at several horizons, as structured [OUTCOME-*] log lines, so the
+	// real-world hit-rate of each signal/combination can be measured and the gate
+	// re-weighted from data instead of intuition.
+	OutcomeLogEnabled  bool  // true
+	OutcomeHorizonsMin []int // {15, 30, 60} — forward-return checkpoints in minutes
 }
 
 // DefaultConfig returns the LOCKED defaults from upgrade.md. MaxT0Score must stay
@@ -56,11 +84,14 @@ func DefaultConfig() Config {
 		// weighting them equally is the honest default. Critically it avoids a
 		// "mandatory signal" — at the old 3/2/1/1, OI Drop alone could veto the
 		// gate (max-without-OI was 4 < gate 5), so 3-of-4 passing setups never
-		// qualified. Now the gate is a plain majority vote (see below).
+		// qualified. Now the gate is a plain majority vote (see below). The CVD
+		// absorption item (added later) is the 5th equal-weighted signal; until the
+		// outcome log proves a signal more predictive, none is privileged.
 		WeightOIDrop:   1,
 		WeightSkew:     1,
 		WeightVolSpike: 1,
 		WeightFunding:  1,
+		WeightCVD:      1,
 
 		// OIDropPct aligned to MinOISignalFraction (0.7%) — the bar at which the
 		// engine itself first calls a directional OI move ("Potential REVERSAL",
@@ -78,9 +109,21 @@ func DefaultConfig() Config {
 		FundingTrendDropPct:  30.0,
 		FundingLookbackHours: 1.0,
 
-		// Gate = 3 of 4 signals (with MaxT0Score 4). The follow-up fires when a
-		// majority of confirmations agree, so no single signal is required and a
-		// stale/flat OI feed cannot block an otherwise-strong setup.
+		CVDMinNotionalUSDT: 250000.0,
+
+		UseAdaptiveThresholds: true,
+		VolSpikePctile:        0.90,
+		OIDropPctile:          0.90,
+		CVDPctile:             0.80,
+		AdaptiveMinSamples:    48,
+
+		FundingFlipEnabled: true,
+
+		// Gate = 3 signals agreeing (out of 5 with MaxT0Score 5). The follow-up
+		// fires on genuine confluence, so no single signal is required and a
+		// stale/flat OI feed cannot block an otherwise-strong setup. Adding CVD as a
+		// 5th item raises the bar for what "3 agree" means without making the gate
+		// stricter numerically.
 		StartConfirmationMinScore: 3,
 
 		MinLeadSeconds:      180,
@@ -89,7 +132,10 @@ func DefaultConfig() Config {
 
 		KlineFetchTimeoutSec: 10,
 		KlineMaxRetries:      3,
+
+		OutcomeLogEnabled:  true,
+		OutcomeHorizonsMin: []int{15, 30, 60},
 	}
-	c.MaxT0Score = c.WeightOIDrop + c.WeightSkew + c.WeightVolSpike + c.WeightFunding
+	c.MaxT0Score = c.WeightOIDrop + c.WeightSkew + c.WeightVolSpike + c.WeightFunding + c.WeightCVD
 	return c
 }

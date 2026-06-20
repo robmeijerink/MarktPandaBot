@@ -48,10 +48,15 @@ The scoring layer is **purely additive** — it never alters or suppresses the b
 
 - **OI Drop** — open interest falling over the window (positions flushed, not replaced).
 - **Skew** — share of long vs. short liquidations, to detect one-sided capitulation.
-- **Vol Spike** — current trading volume vs. a rolling median baseline of recent 5-minute buckets.
-- **Funding** — funding flipping to/through the neutral line.
+- **Vol Spike** — current trading volume vs. a rolling baseline of recent 5-minute buckets.
+- **Funding** — funding at/through the neutral line **or** a sharp downtrend from a positive level (longs capitulating, anticipating the flip).
+- **CVD** — perp cumulative-volume-delta (net taker flow) **opposing** the flush: buyers stepping in under a long capitulation, or sellers into a short squeeze. This is the absorption confirmation, and it's the one signal that's independent of the position-based items above, so it adds genuinely new information rather than echoing them.
 
 Each signal carries a configurable weight; the totals and the conviction cutoff are all tunable.
+
+**Adaptive thresholds.** Rather than fixed cutoffs (e.g. "5× median volume", "0.7% OI drop") that drift out of calibration as the market regime changes, OI Drop, Vol Spike, and CVD can be gated on their **trailing distribution** — a signal passes when the current reading ranks in the top percentile of recent windows. Each adaptive gate falls back to its fixed bar until its history ring has warmed up, so the score is always defined. Toggle with `UseAdaptiveThresholds`.
+
+**Measuring accuracy.** None of these signals are validated edges. Every dispatched alert is labelled with its full feature vector (`[OUTCOME-T0]`) and its realised forward return at 15/30/60 minutes (`[OUTCOME-FWD]`), as structured log lines joined by an `id=`. Grep the logs and you can compute the real hit-rate of each signal and each combination, then re-weight the matrix from data instead of intuition.
 
 **Stage 2 — Candle-Sync Confirmation (T+N, delayed).** Only setups at or above the configured conviction cutoff start a confirmation. A cancelable worker aligns to UTC 5-minute boundaries, waits for the next fully-closed candle, and then reports a verdict from three signals:
 
@@ -69,15 +74,17 @@ A fresh qualifying alert cancels any pending confirmation and starts a new one, 
 
 A separate, fully self-contained module watches for **pullback / retest entries** on the 3-minute timeframe. It is completely decoupled from the liquidation engine above — it keeps its own state, streams its own candles, and sends its own messages. It shares no data with the scoring layer and cannot affect the base liquidation alerts.
 
-The idea is mechanical, not pattern-matching: a 21/200 SMA cross sets the trend, then the module waits for price to pull back and make a **bar-close touch of the 21 SMA** (dynamic support for longs, resistance for shorts). A pullback all the way to the **200 SMA** invalidates the setup.
+The idea is mechanical, not pattern-matching, and follows the CryptoLifer "model": a 21/200 SMA cross sets the trend, the module waits for a **real directional impulse (flagpole)** that the market then consolidates into a **tight, contracting flag**, and only then takes the **bar-close touch of the 21 SMA** (dynamic support for longs, resistance for shorts) as the entry confirmation. A pullback all the way to the **200 SMA** invalidates the setup.
 
 **How it works:**
 
-1. **Trend (regime).** A golden cross (21 SMA above 200 SMA) arms **long** retest setups; a death cross arms **short** setups. Both directions are watched. There is no alert on the cross itself — only on the subsequent touch.
-2. **Bar-close touch.** A long touch fires only when the candle's low reaches the 21 SMA (within a small tolerance band) **and the candle closes back at or above it** — a wick that pierces the SMA but closes below is rejected. Shorts mirror this. This close-on-the-right-side filter is the whole point of evaluating on closed bars.
-3. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
-4. **Anti-spam.** By default a single touch is alerted per regime (first-only) — one notification per cross, then silent until the next 21/200 cross. An optional debounce mode instead allows repeat touches, but only after price has closed back outside the tolerance band between them.
-5. **Warm boot.** On startup the module silently hydrates ~300 closed 3m candles from REST and establishes the current regime **without firing a historical alert**; the first qualifying live bar can still trigger.
+1. **Trend (regime).** A golden cross (21 SMA above 200 SMA) arms **long** retest setups; a death cross arms **short** setups. Both directions are watched. There is no alert on the cross itself — only on the subsequent confirmed entry.
+2. **Flagpole gate.** A touch only counts as an entry when a **real, trend-aligned impulse precedes the consolidation** — the pole must be a genuine directional move (close-to-close ≥ `FlagMinPolePct` of price over `PoleLookback` bars) and it must dominate the consolidation (≥ `FlagMinPoleRatio` × flag range). The move must run **with** the trend (up into a long, down into a short). Without this gate, quiet sideways chop passes the tightness test and fires on every mean reversion; the pole requirement enforces that only a real impulse followed by digestion (flag) triggers the entry. The gate can be disabled with `RequireTightFlag=false`.
+3. **Tight-flag gate.** The consolidation leading into the touch must be a **tight, contracting flag** — over a lookback window the recent range must be small (within `FlagMaxRangePct` of price) and tighter than the earlier range (`FlagContractionRatio`). This ensures the market has digested the impulse and is coiling before the entry touch, matching the CryptoLifer model timing. Both the pole and the tight flag are required; either can fail independently.
+4. **Bar-close touch.** A long touch fires only when the candle's low reaches the 21 SMA (within a small tolerance band) **and the candle closes back at or above it** — a wick that pierces the SMA but closes below is rejected. Shorts mirror this. This close-on-the-right-side filter is the whole point of evaluating on closed bars.
+5. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
+6. **Anti-spam.** By default a single entry is alerted per regime (first-only) — one notification per cross, then silent until the next 21/200 cross. An optional debounce mode instead allows repeat touches, but only after price has closed back outside the tolerance band between them.
+7. **Warm boot.** On startup the module silently hydrates ~300 closed 3m candles from REST and establishes the current regime **without firing a historical alert**; the first qualifying live bar can still trigger.
 
 **Data source.** The 3m candles come from the primary exchange (Bybit perp BTC/USDT by default) over a WebSocket kline subscription, with a REST poll as an automatic fallback if the socket goes quiet — so a dropped connection or a geo-blocked REST host (it transparently fails over to Bybit's `bytick.com` mirror) does not silence the feed.
 
@@ -113,10 +120,11 @@ Fund: 0.0120%   OI: $4.29B (Δ -$5.1M)
 
 ------------------------
 📊 SETUP MATRIX (T0)
-✅ OI Drop        : <weight>
-✅ Skew           : <weight>
-❌ Vol Spike      : 0
-✅ Funding Flip   : <weight>
+✅ OI Drop     top 10% drop   +<weight>
+✅ Skew        ≥90% long      +<weight>
+❌ Vol Spike   top 10% vol    0
+✅ Funding     flip/trend ≤0  +<weight>
+✅ CVD         absorb flush   +<weight>
 
 Score: <sum>/<max>   (HIGH CONVICTION)
 ⏳ Monitoring absorption window…
@@ -145,11 +153,13 @@ BTC/USDT  @ 63704.40
 21 SMA: 63702.10   |   200 SMA: 63180.50
 Touch low: 63689.20   (stop reference, not advice)
 Room to 200 SMA: 0.82%
+Pole: +0.95% impulse over 6 bars
+Flag: tight (0.31% over 12 bars)
 Regime: 14 bars since golden cross
-Bar-close confirmed touch of the 21 SMA (support held).
+Pole + tight-flag touch of the 21 SMA (support held) — model entry.
 ```
 
-> Short setups mirror this (death cross, `Touch high`, "resistance held"). The values above are illustrative.
+> Short setups mirror this (death cross, `Touch high`, "resistance held"). The pole shows the signed directional impulse; the flag shows the tight consolidation range. The values above are illustrative.
 
 ## 🚀 Setup & Configuration
 
@@ -198,8 +208,8 @@ This generates the static `marktpanda_bot` executable, which can be deployed dir
 All tunable behavior lives in configuration blocks inside the internal packages — no engine logic needs to change to adjust it:
 
 - **Confluence thresholds** for the base liquidation alert (per-exchange volume gating, regime sensitivity).
-- **Setup Matrix** signal weights and pass thresholds, plus the conviction cutoff that gates the follow-up confirmation.
+- **Setup Matrix** signal weights and pass thresholds (incl. the CVD absorption floor and the adaptive percentile gates), the funding flip/trend lookback, the conviction cutoff that gates the follow-up confirmation, and the outcome-logging horizons.
 - **Confirmation timing** (candle interval and minimum lead time) and **warm-boot** parameters (history depth, fetch timeout/retries).
-- **SMA Retest module** (separate config block): timeframe and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), direction filter (both/long/short), the re-arm/anti-spam mode, and warm-boot depth.
+- **SMA Retest module** (separate config block): timeframe and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole gate (`PoleLookback`, `FlagMinPolePct`, `FlagMinPoleRatio`) and the tight-flag gate (`RequireTightFlag`, `FlagLookback`, `FlagMaxRangePct`, `FlagContractionRatio`), direction filter (both/long/short), the re-arm/anti-spam mode, and warm-boot depth.
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and backtest before relying on the scores or verdicts.
