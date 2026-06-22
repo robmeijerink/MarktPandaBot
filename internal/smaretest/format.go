@@ -17,12 +17,12 @@ func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
 				"21 SMA: %.2f   |   200 SMA: %.2f\n"+
 				"Touch low: %.2f\n"+
 				"Room to 200 SMA: %.2f%%\n"+
-				"Pole: %+.2f%% impulse over %d bars\n"+
-				"Flag: tight (%.2f%% over %d bars)\n"+
+				"Moved %.2f%% away from the 21 since the cross\n"+
+				"Range: tight (%.2f%% over %d bars)\n"+
 				"Regime: %d bars since golden cross\n"+
-				"Pole + tight-flag touch of the 21 SMA (support held) — model entry.",
+				"Move-away + tight-range retest of the 21 SMA (support held) — model entry.",
 			cfg.Timeframe, displaySymbol(cfg.Symbol), c.bar.Close,
-			c.fast, c.slow, c.bar.Low, roomPct, c.flagPolePct, cfg.PoleLookback, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
+			c.fast, c.slow, c.bar.Low, roomPct, c.sepPct, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
 	}
 	return fmt.Sprintf(
 		"📐 SMA RETEST — SHORT (%s)\n"+
@@ -30,12 +30,12 @@ func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
 			"21 SMA: %.2f   |   200 SMA: %.2f\n"+
 			"Touch high: %.2f\n"+
 			"Room to 200 SMA: %.2f%%\n"+
-			"Pole: %+.2f%% impulse over %d bars\n"+
-			"Flag: tight (%.2f%% over %d bars)\n"+
+			"Moved %.2f%% away from the 21 since the cross\n"+
+			"Range: tight (%.2f%% over %d bars)\n"+
 			"Regime: %d bars since death cross\n"+
-			"Pole + tight-flag touch of the 21 SMA (resistance held) — model entry.",
+			"Move-away + tight-range retest of the 21 SMA (resistance held) — model entry.",
 		cfg.Timeframe, displaySymbol(cfg.Symbol), c.bar.Close,
-		c.fast, c.slow, c.bar.High, roomPct, c.flagPolePct, cfg.PoleLookback, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
+		c.fast, c.slow, c.bar.High, roomPct, c.sepPct, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
 }
 
 // buildInvalidation renders the optional note sent when price reaches the 200 SMA

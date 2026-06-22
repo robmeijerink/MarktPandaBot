@@ -91,38 +91,30 @@ func (in *indicators) atr(period int) (float64, bool) {
 	return sum / float64(period), true
 }
 
-// flagWindow describes the consolidation ("flag") leading up to the most recent
+// flagWindow describes the consolidation ("range") leading up to the most recent
 // bar. It is the price range over a lookback window, split into an earlier and a
 // recent half, so the state machine can tell whether volatility is contracting
-// into a tight flag before a 21 SMA touch — the CryptoLifer "model" entry premise.
+// into a tight range before a 21 SMA touch — the CryptoLifer "model" entry premise.
 type flagWindow struct {
 	fullRange    float64 // high-low over the whole window
 	earlierRange float64 // high-low over the older half
 	recentRange  float64 // high-low over the newer half
 	refPrice     float64 // last close in the window, for percent math
-	poleMove     float64 // signed close-to-close move of the impulse preceding the flag
-	ok           bool    // false when there is not enough history (for BOTH pole and flag)
+	ok           bool    // false when there is not enough history for the window
 }
 
 // flag measures the consolidation over the `lookback` bars ending JUST BEFORE the
-// most recent bar. The last stored bar is the touch candidate; the flag is the
+// most recent bar. The last stored bar is the touch candidate; the range is the
 // run-up that precedes it, so it is excluded here. ok is false until enough bars
 // exist (warm boot fills the window long before this matters).
-func (in *indicators) flag(lookback, poleLookback int) flagWindow {
+func (in *indicators) flag(lookback int) flagWindow {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	n := len(in.bars)
 	end := n - 2 // bar before the touch candidate
 	start := end - lookback + 1
-	if lookback < 2 || poleLookback < 1 || start < 0 {
+	if lookback < 2 || start < 0 {
 		return flagWindow{}
-	}
-	// The pole is the impulse run-up that leads directly into the flag: the
-	// poleLookback bars ENDING on the bar just before the flag begins.
-	poleEnd := start - 1
-	poleStart := poleEnd - poleLookback + 1
-	if poleStart < 0 {
-		return flagWindow{} // not enough history for the pole that precedes the flag
 	}
 	half := lookback / 2
 	rng := func(lo, hi int) float64 {
@@ -138,12 +130,11 @@ func (in *indicators) flag(lookback, poleLookback int) flagWindow {
 		earlierRange: rng(start, start+half-1),
 		recentRange:  rng(end-half+1, end),
 		refPrice:     in.bars[end].Close,
-		poleMove:     in.bars[poleEnd].Close - in.bars[poleStart].Close,
 		ok:           true,
 	}
 }
 
-// tightFlag reports whether the flag qualifies as a tight, contracting consolidation
+// tightFlag reports whether the range qualifies as a tight, contracting consolidation
 // per the config: the recent half must be tight right now (height <= FlagMaxRangePct
 // of price) AND getting tighter (recent half <= FlagContractionRatio of the earlier
 // half). A degenerate flat earlier half counts as maximally contracted.
@@ -160,26 +151,53 @@ func tightFlag(cfg Config, fw flagWindow) bool {
 	return fw.recentRange <= cfg.FlagContractionRatio*fw.earlierRange
 }
 
-// validPole reports whether a genuine flag POLE precedes the consolidation for the
-// given regime — the piece that distinguishes a real flag from quiet sideways
-// drift. Three conditions, all required: (1) the pole is a real impulse, not noise
-// (close-to-close move >= FlagMinPolePct of price); (2) it dwarfs the flag it leads
-// into (|move| >= FlagMinPoleRatio * full flag range); and (3) it runs WITH the
-// trend (up into a long, down into a short). The magnitude floor is checked before
-// the sign so a flat window (move ~ 0) is rejected outright rather than being
-// "aligned" to short by sign convention.
-func validPole(cfg Config, fw flagWindow, regime int) bool {
-	if !fw.ok || fw.refPrice <= 0 {
-		return false
+// maxSeparationSinceCross returns how far price moved AWAY from the fast (21) SMA,
+// in the trend direction, at its furthest point since the most recent fast/slow
+// cross — as a fraction of price. For a long it is the largest (High-fast)/fast; for
+// a short the largest (fast-Low)/fast. It mirrors barsSinceLastCross: it scans the
+// ready window, finds the last sign flip of (fast-slow), then measures the peak
+// excursion from that bar onward. Used to seed the live state after a silent warm
+// boot so a setup that already separated before startup can still fire.
+func (in *indicators) maxSeparationSinceCross(fast, slow int) float64 {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	n := len(in.bars)
+	if n < slow {
+		return 0
 	}
-	move := math.Abs(fw.poleMove)
-	if move/fw.refPrice*100 < cfg.FlagMinPolePct {
-		return false // no real impulse — this is drift/chop, not a pole
+	lastIdx := n - 1
+	crossIdx := slow - 1
+	prevSign := 0
+	for idx := slow - 1; idx <= lastIdx; idx++ {
+		f, okF := smaAt(in.bars, fast, idx)
+		s, okS := smaAt(in.bars, slow, idx)
+		if !okF || !okS {
+			continue
+		}
+		sign := sign2(f - s)
+		if prevSign != 0 && sign != prevSign {
+			crossIdx = idx
+		}
+		prevSign = sign
 	}
-	if move < cfg.FlagMinPoleRatio*fw.fullRange {
-		return false // pole does not dominate the flag — not flag geometry
+	regime := prevSign // sign of (fast-slow) at the most recent bar
+	maxSep := 0.0
+	for idx := crossIdx; idx <= lastIdx; idx++ {
+		f, ok := smaAt(in.bars, fast, idx)
+		if !ok || f <= 0 {
+			continue
+		}
+		var sep float64
+		if regime == regimeLong {
+			sep = (in.bars[idx].High - f) / f
+		} else {
+			sep = (f - in.bars[idx].Low) / f
+		}
+		if sep > maxSep {
+			maxSep = sep
+		}
 	}
-	return sign2(fw.poleMove) == regime // pole must run in the trend direction
+	return maxSep
 }
 
 // smaAt computes the simple moving average of closes ending at endIdx (inclusive)

@@ -74,16 +74,16 @@ A fresh qualifying alert cancels any pending confirmation and starts a new one, 
 
 A separate, fully self-contained module watches for **pullback / retest entries** on the 3-minute timeframe. It is completely decoupled from the liquidation engine above — it keeps its own state, streams its own candles, and sends its own messages. It shares no data with the scoring layer and cannot affect the base liquidation alerts.
 
-The idea is mechanical, not pattern-matching, and follows the CryptoLifer "model": a 21/200 SMA cross sets the trend, the module waits for a **real directional impulse (flagpole)** that the market then consolidates into a **tight, contracting flag**, and only then takes the **bar-close touch of the 21 SMA** (dynamic support for longs, resistance for shorts) as the entry confirmation. A pullback all the way to the **200 SMA** invalidates the setup.
+The idea is mechanical, not pattern-matching, and follows the CryptoLifer "model": a 21/200 SMA cross sets the trend, price **moves away** from the lines in the trend direction, the market then **tightens into a contracting range**, and only then the module takes the **bar-close touch of the 21 SMA** (dynamic support for longs, resistance for shorts) as the entry confirmation. A pullback all the way to the **200 SMA** invalidates the setup.
 
 **How it works:**
 
 1. **Trend (regime).** A golden cross (21 SMA above 200 SMA) arms **long** retest setups; a death cross arms **short** setups. Both directions are watched. There is no alert on the cross itself — only on the subsequent confirmed entry.
-2. **Flagpole gate.** A touch only counts as an entry when a **real, trend-aligned impulse precedes the consolidation** — the pole must be a genuine directional move (close-to-close ≥ `FlagMinPolePct` of price over `PoleLookback` bars) and it must dominate the consolidation (≥ `FlagMinPoleRatio` × flag range). The move must run **with** the trend (up into a long, down into a short). Without this gate, quiet sideways chop passes the tightness test and fires on every mean reversion; the pole requirement enforces that only a real impulse followed by digestion (flag) triggers the entry. The gate can be disabled with `RequireTightFlag=false`.
-3. **Tight-flag gate.** The consolidation leading into the touch must be a **tight, contracting flag** — over a lookback window the recent range must be small (within `FlagMaxRangePct` of price) and tighter than the earlier range (`FlagContractionRatio`). This ensures the market has digested the impulse and is coiling before the entry touch, matching the CryptoLifer model timing. Both the pole and the tight flag are required; either can fail independently.
+2. **Move-away gate.** A touch only counts as an entry when price has **moved far enough away from the 21 SMA** since the cross (in the trend direction) at some point — the separation must reach ≥ `MinSeparationPct` of price. This enforces that a real directional impulse is already in the books before the entry signal fires. Without this gate, price consolidating right at the 21 SMA would fire on every local mean reversion; the move-away requirement ensures there is a real step away from the lines. The gate can be disabled with `RequireTightFlag=false`.
+3. **Tight-range gate.** The consolidation leading into the touch must be a **tight, contracting range** — over a lookback window the recent range must be small (within `FlagMaxRangePct` of price) and tighter than the earlier range (`FlagContractionRatio`). This ensures the market is coiling before the entry touch, matching the CryptoLifer model timing. Both the move-away and the tight range are required; either can fail independently.
 4. **Bar-close touch.** A long touch fires only when the candle's low reaches the 21 SMA (within a small tolerance band) **and the candle closes back at or above it** — a wick that pierces the SMA but closes below is rejected. Shorts mirror this. This close-on-the-right-side filter is the whole point of evaluating on closed bars.
 5. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
-6. **Anti-spam.** By default a single entry is alerted per regime (first-only) — one notification per cross, then silent until the next 21/200 cross. An optional debounce mode instead allows repeat touches, but only after price has closed back outside the tolerance band between them.
+6. **Anti-spam.** By default, when a touch fires, the setup stays armed until price closes back outside the tolerance band (debounce mode) — allowing multiple alerts per cross, one for each clean retest. This matches the CryptoLifer model where each tight-range retest is a separate entry opportunity within the same trend.
 7. **Warm boot.** On startup the module silently hydrates ~300 closed 3m candles from REST and establishes the current regime **without firing a historical alert**; the first qualifying live bar can still trigger.
 
 **Data source.** The 3m candles come from the primary exchange (Bybit perp BTC/USDT by default) over a WebSocket kline subscription, with a REST poll as an automatic fallback if the socket goes quiet — so a dropped connection or a geo-blocked REST host (it transparently fails over to Bybit's `bytick.com` mirror) does not silence the feed.
@@ -153,13 +153,13 @@ BTC/USDT  @ 63704.40
 21 SMA: 63702.10   |   200 SMA: 63180.50
 Touch low: 63689.20   (stop reference, not advice)
 Room to 200 SMA: 0.82%
-Pole: +0.95% impulse over 6 bars
-Flag: tight (0.31% over 12 bars)
+Moved +0.95% away from the 21 since the cross
+Range: tight (0.31% over 12 bars)
 Regime: 14 bars since golden cross
-Pole + tight-flag touch of the 21 SMA (support held) — model entry.
+Move-away + tight-range retest of the 21 SMA (support held) — model entry.
 ```
 
-> Short setups mirror this (death cross, `Touch high`, "resistance held"). The pole shows the signed directional impulse; the flag shows the tight consolidation range. The values above are illustrative.
+> Short setups mirror this (death cross, `Touch high`, "resistance held"). The "moved away" metric shows the furthest price got from the 21 SMA since the cross; the "tight range" shows the current consolidation tightness. The values above are illustrative.
 
 ## 🚀 Setup & Configuration
 
@@ -210,6 +210,6 @@ All tunable behavior lives in configuration blocks inside the internal packages 
 - **Confluence thresholds** for the base liquidation alert (per-exchange volume gating, regime sensitivity).
 - **Setup Matrix** signal weights and pass thresholds (incl. the CVD absorption floor and the adaptive percentile gates), the funding flip/trend lookback, the conviction cutoff that gates the follow-up confirmation, and the outcome-logging horizons.
 - **Confirmation timing** (candle interval and minimum lead time) and **warm-boot** parameters (history depth, fetch timeout/retries).
-- **SMA Retest module** (separate config block): timeframe and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole gate (`PoleLookback`, `FlagMinPolePct`, `FlagMinPoleRatio`) and the tight-flag gate (`RequireTightFlag`, `FlagLookback`, `FlagMaxRangePct`, `FlagContractionRatio`), direction filter (both/long/short), the re-arm/anti-spam mode, and warm-boot depth.
+- **SMA Retest module** (separate config block): timeframe and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the move-away gate (`MinSeparationPct`) and the tight-range gate (`RequireTightFlag`, `FlagLookback`, `FlagMaxRangePct`, `FlagContractionRatio`), direction filter (both/long/short), the re-arm/anti-spam mode (`ReArmMode`; default is now debounce for multiple retests per cross), and warm-boot depth.
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and backtest before relying on the scores or verdicts.

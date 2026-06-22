@@ -1,9 +1,9 @@
 // Package smaretest is a fully self-contained 21/200 SMA pullback/retest alert
 // module. After a 21/200 SMA cross sets the trend on closed 3m candles, it waits
-// for a directional impulse (flagpole) followed by a consolidation (tight flag),
-// then takes a bar-close touch of the 21 SMA (dynamic support for longs /
-// resistance for shorts) as the entry confirmation; a pullback all the way to the
-// 200 SMA invalidates the setup.
+// for price to MOVE AWAY from the lines (separation) and then tighten into a
+// contracting range, then takes a bar-close touch of the 21 SMA (dynamic support
+// for longs / resistance for shorts) as the entry confirmation; a pullback all
+// the way to the 200 SMA invalidates the setup.
 //
 // ISOLATION: this package owns all of its state, files and messages. It does not
 // read or depend on the liquidation/reversal feature or any existing alert logic.
@@ -44,25 +44,24 @@ type Config struct {
 	ATRPeriod       int     // 14
 	ATRMult         float64 // 0.25
 
-	// Tight-flag entry gate (TUNABLE). The CryptoLifer "model" does not enter on
-	// every 21 SMA touch — it waits for a flagpole followed by a CONSOLIDATION that
-	// is getting tight (volatility compressing) and only then takes the touch of the
-	// 21 SMA as the entry confirmation. These knobs gate the touch on that flag so we
-	// alert when the model is actually playing out, not on every pullback to the mean.
-	RequireTightFlag     bool    // true — suppress touches not preceded by a tight, contracting flag
-	FlagLookback         int     // 12 — bars (ending just before the touch bar) that form the flag
-	FlagMaxRangePct      float64 // 0.5 — recent-half flag height must be <= this % of price (tight NOW)
-	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (getting tighter)
+	// Move-away gate (TUNABLE). The CryptoLifer "model" does not enter on every 21
+	// SMA touch — after the 21/200 cross it first wants price to MOVE AWAY from the
+	// lines, then go sideways and tighten, and only then takes the pullback touch of
+	// the 21 SMA as the entry. MinSeparationPct is that move-away requirement: price
+	// must have reached at least this far from the 21 SMA (in the trend direction)
+	// AT SOME POINT since the cross before a touch-back counts. This replaces the old
+	// fixed-position "flagpole" check, which demanded the impulse sit at an exact bar
+	// offset before the touch and so suppressed setups whose consolidation ran long.
+	MinSeparationPct float64 // 0.3 — price must move >= this % away from the 21 SMA since the cross
 
-	// Flag-pole entry gate (TUNABLE). A flag is only a flag if a POLE precedes it: a
-	// fast, directional impulse in the trend direction that the consolidation then
-	// digests. Without this, a quiet sideways drift passes the tightness/contraction
-	// test above (a "flag" with no pole) and fires on every mean reversion. The pole
-	// is measured over the PoleLookback bars ENDING JUST BEFORE the flag, close-to-
-	// close, so directional progress counts and choppy no-progress windows do not.
-	PoleLookback     int     // 6   — bars forming the impulse that must precede the flag
-	FlagMinPolePct   float64 // 0.6 — |pole close-to-close move| must be >= this % of price (a real impulse)
-	FlagMinPoleRatio float64 // 1.5 — |pole move| must be >= ratio * full flag range (pole dwarfs the flag)
+	// Tight-flag entry gate (TUNABLE). After the move-away, the model wants a
+	// CONSOLIDATION that is getting tight (volatility compressing). These knobs gate
+	// the touch on that contracting range so we alert when the model is actually
+	// playing out, not on every pullback to the mean.
+	RequireTightFlag     bool    // true — suppress touches without a tight, contracting range into the touch
+	FlagLookback         int     // 12 — bars (ending just before the touch bar) that form the range
+	FlagMaxRangePct      float64 // 0.5 — recent-half range height must be <= this % of price (tight NOW)
+	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (getting tighter)
 
 	// Re-arm / anti-spam (TUNABLE).
 	ReArmMode        string // "debounce" (default) | "firstOnly"
@@ -89,14 +88,12 @@ func DefaultConfig() Config {
 		TouchTolPct:          0.05,
 		ATRPeriod:            14,
 		ATRMult:              0.25,
+		MinSeparationPct:     0.3,
 		RequireTightFlag:     true,
 		FlagLookback:         12,
 		FlagMaxRangePct:      0.5,
 		FlagContractionRatio: 0.8,
-		PoleLookback:         6,
-		FlagMinPolePct:       0.6,
-		FlagMinPoleRatio:     1.5,
-		ReArmMode:            ReArmFirstOnly,
+		ReArmMode:            ReArmDebounce,
 		EmitInvalidation:     false,
 		BarCloseGraceSec:     5,
 		KlineFetchTimeoutSec: 10,
