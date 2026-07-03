@@ -8,26 +8,11 @@ import (
 
 // Telegram renders messages in a proportional font, so space-padding only lines
 // up inside a fixed-width (```) code block. The formatters here build the aligned
-// blocks; the engine wraps the exchange tables and the Setup Matrix in code fences.
-
-// passMark renders a signal's pass/fail compactly for log lines (grep-friendly).
-func passMark(pass bool) string {
-	if pass {
-		return "PASS"
-	}
-	return "fail"
-}
+// per-venue blocks; the engine wraps the exchange tables in a code fence.
 
 // comma formats a number as a thousands-grouped integer: 63681 -> "63,681".
 func comma(v float64) string {
 	return groupThousands(fmt.Sprintf("%.0f", math.Abs(v)), v < 0)
-}
-
-// comma2 keeps two decimals: 64840 -> "64,840.00" (used for price-precise fields).
-func comma2(v float64) string {
-	s := fmt.Sprintf("%.2f", math.Abs(v))
-	dot := strings.IndexByte(s, '.')
-	return groupThousands(s[:dot], v < 0) + s[dot:]
 }
 
 func groupThousands(intPart string, neg bool) string {

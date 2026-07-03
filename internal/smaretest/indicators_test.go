@@ -9,7 +9,7 @@ import (
 func pushCloses(in *indicators, closes ...float64) {
 	base := int64(1_700_000_000_000)
 	for i, c := range closes {
-		in.push(Bar{BucketStart: time.UnixMilli(base + int64(i)*180000).UTC(), Open: c, High: c, Low: c, Close: c})
+		in.push(Bar{BucketStart: time.UnixMilli(base + int64(i)*60000).UTC(), Open: c, High: c, Low: c, Close: c})
 	}
 }
 
@@ -36,7 +36,7 @@ func TestATR(t *testing.T) {
 	base := int64(1_700_000_000_000)
 	for i := 0; i < 5; i++ {
 		c := 100.0
-		in.push(Bar{BucketStart: time.UnixMilli(base + int64(i)*180000).UTC(), Open: c, High: c + 1, Low: c - 1, Close: c})
+		in.push(Bar{BucketStart: time.UnixMilli(base + int64(i)*60000).UTC(), Open: c, High: c + 1, Low: c - 1, Close: c})
 	}
 	if v, ok := in.atr(3); !ok || !approx(v, 2) {
 		t.Fatalf("atr(3) = %v ok=%v, want 2", v, ok)
@@ -64,7 +64,7 @@ func TestFlagTight(t *testing.T) {
 	base := int64(1_700_000_000_000)
 	pushOHLC := func(in *indicators, bars ...Bar) {
 		for i, b := range bars {
-			b.BucketStart = time.UnixMilli(base + int64(i)*180000).UTC()
+			b.BucketStart = time.UnixMilli(base + int64(i)*60000).UTC()
 			in.push(b)
 		}
 	}
@@ -108,8 +108,8 @@ func TestFlagTight(t *testing.T) {
 	}
 }
 
-// TestMaxSeparationSinceCross verifies the warm-boot seed: the peak excursion of
-// price from the 21 SMA, in the trend direction, since the most recent cross.
+// TestRecentSeparations verifies the warm-boot seed: the per-bar excursion of price
+// from the fast SMA in the trend direction, over the recent window, clamped to >= 0.
 func TestRecentSeparations(t *testing.T) {
 	// Rising series: price runs above the fast SMA => positive separations, clamped
 	// to the recency window.

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Bar is one finalized 3m candle. BucketStart is the UTC candle-open time used to
+// Bar is one finalized 1m candle. BucketStart is the UTC candle-open time used to
 // dedupe the WebSocket (primary) and REST (fallback) feeds.
 type Bar struct {
 	BucketStart time.Time

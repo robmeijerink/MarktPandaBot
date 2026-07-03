@@ -210,7 +210,7 @@ func TestWarmBootSilentThenFire(t *testing.T) {
 	closes := []float64{100, 101, 102, 103, 104, 105}
 	base := int64(1_700_000_000_000)
 	for i, c := range closes {
-		ind.push(Bar{BucketStart: msTime(base + int64(i)*180000), Open: c, High: c, Low: c, Close: c})
+		ind.push(Bar{BucketStart: msTime(base + int64(i)*60000), Open: c, High: c, Low: c, Close: c})
 	}
 
 	// Exercise the real silent-arming path used by warm boot.
@@ -228,7 +228,7 @@ func TestWarmBootSilentThenFire(t *testing.T) {
 	// First live bar: close 105 lands exactly on the post-push SMA2 = (105+105)/2,
 	// the low dips into the band, and it does not breach SMA3 (≈104.67). It should
 	// fire exactly once even though the cross was historical.
-	live := Bar{BucketStart: msTime(base + 6*180000), Open: 105, High: 105.1, Low: 104.9, Close: 105}
+	live := Bar{BucketStart: msTime(base + 6*60000), Open: 105, High: 105.1, Low: 104.9, Close: 105}
 	m.processBar(live)
 	if len(sent) != 1 {
 		t.Fatalf("first qualifying live bar should fire exactly once, got %d", len(sent))

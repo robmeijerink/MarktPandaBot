@@ -8,7 +8,7 @@ import (
 )
 
 // Run is the module entry point: it warm-boots the regime silently, then consumes
-// finalized 3m bars from the WebSocket (primary) and a REST poll (fallback),
+// finalized 1m bars from the WebSocket (primary) and a REST poll (fallback),
 // running the state machine on a single goroutine. It is meant to be launched as
 // `go smaretest.Run(cfg, send)` and blocks forever. `send` delivers a finished
 // alert string (wire it to the existing Telegram client in main).

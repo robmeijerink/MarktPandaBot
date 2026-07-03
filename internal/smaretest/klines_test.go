@@ -44,10 +44,10 @@ func (h *klineHistory) handler() http.HandlerFunc {
 
 func makeHistory(n int) []Bar {
 	// Newest closed bar is well in the past so nothing is filtered as in-progress.
-	newest := time.Now().UTC().Truncate(3 * time.Minute).Add(-1 * time.Hour)
+	newest := time.Now().UTC().Truncate(time.Minute).Add(-1 * time.Hour)
 	bars := make([]Bar, n)
 	for i := 0; i < n; i++ {
-		start := newest.Add(time.Duration(-(n - 1 - i)) * 3 * time.Minute)
+		start := newest.Add(time.Duration(-(n - 1 - i)) * time.Minute)
 		c := 100.0 + float64(i)
 		bars[i] = Bar{BucketStart: start, Open: c, High: c + 1, Low: c - 1, Close: c}
 	}
@@ -57,15 +57,14 @@ func makeHistory(n int) []Bar {
 func TestFetchClosedBarsOrderAndInProgress(t *testing.T) {
 	hist := makeHistory(4)
 	// Append an in-progress bar at the current bucket; fetchClosedBars must drop it.
-	cur := time.Now().UTC().Truncate(3 * time.Minute)
+	cur := time.Now().UTC().Truncate(time.Minute)
 	hist = append(hist, Bar{BucketStart: cur, Open: 999, High: 999, Low: 999, Close: 999})
 
 	srv := httptest.NewServer((&klineHistory{bars: hist, pageCap: 100}).handler())
 	defer srv.Close()
 	defer setBases(srv.URL)()
 
-	cfg := DefaultConfig()
-	cfg.Timeframe = "3m" // makeHistory / the in-progress bar are built on 3m boundaries
+	cfg := DefaultConfig() // 1m; makeHistory / the in-progress bar are built on 1m boundaries
 	got, err := fetchClosedBars(httpTestClient(), cfg, 0, 10)
 	if err != nil {
 		t.Fatalf("fetchClosedBars error: %v", err)

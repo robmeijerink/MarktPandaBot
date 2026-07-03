@@ -1,5 +1,5 @@
 // Package smaretest is a fully self-contained 21/200 SMA pullback/retest alert
-// module. After a 21/200 SMA cross sets the trend on closed 3m candles, it waits
+// module. After a 21/200 SMA cross sets the trend on closed 1m candles, it waits
 // for price to MOVE AWAY from the lines (separation) and then tighten into a
 // contracting range, then takes a bar-close touch of the 21 SMA (dynamic support
 // for longs / resistance for shorts) as the entry confirmation; a pullback all
@@ -40,7 +40,7 @@ type Config struct {
 
 	// Touch band around the 21 SMA (TUNABLE).
 	UseATRTolerance bool    // false — if true use ATRMult*ATR, else pct band
-	TouchTolPct     float64 // 0.04 — percent band (0.04 = 0.04%); tighter on 1m than the old 3m value
+	TouchTolPct     float64 // 0.04 — percent band (0.04 = 0.04%); a tight band suited to fast 1m bars
 	ATRPeriod       int     // 14
 	ATRMult         float64 // 0.25
 

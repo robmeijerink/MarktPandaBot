@@ -267,34 +267,13 @@ func classifySignal(combinedOI, combinedOIDelta, longUSDT, shortUSDT float64) (l
 	return fmt.Sprintf("➡️ %s CONTINUATION UP — shorts flushed, OI rising", conf), dropFraction
 }
 
-// flushWindowCVD returns the net signed perp taker notional (USD) around the flush:
-// the just-closed UTC 5-minute bucket plus the in-progress one. Summing both makes
-// it robust to where the engine's (unaligned) evaluation tick falls relative to the
-// UTC bucket boundary, capturing the ~5–10 minutes of taker flow during the cascade.
-// Positive => net taker-buying (absorption under a long flush).
-func flushWindowCVD(flow *FlowTracker, now time.Time) float64 {
-	cur := floorTo5Min(now)
-	return flow.PerpCVD(cur) + flow.PerpCVD(cur.Add(-EvaluationInterval))
-}
-
-func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config, ring *VolumeRing, confMgr *ConfirmationManager, flow *FlowTracker, outcome *OutcomeLogger, token, chatID string) {
+func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chatID string) {
 	ticker := time.NewTicker(EvaluationInterval)
 	defer ticker.Stop()
 
 	log.Printf("[ENGINE] Confluence engine started. Evaluating every %s "+
 		"(dynamic threshold, floor %s; OI labels Potential at >= %.2f%%, Likely at >= %.2f%%)",
 		EvaluationInterval, humanUSD(ThresholdFloorUSDT), MinOISignalFraction*100, StrongOISignalFraction*100)
-
-	// Trailing histories for the adaptive thresholds and the funding-trend test.
-	// They are fed EVERY cycle (including idle ones) so the distributions stay
-	// representative of the regime rather than only of alert windows.
-	fundingLookbackWindows := int(cfg.FundingLookbackHours * 3600 / EvaluationInterval.Seconds())
-	if fundingLookbackWindows < 1 {
-		fundingLookbackWindows = 1
-	}
-	oiDropHist := NewStatRing(cfg.BufferSize)              // recent OI-drop magnitudes (%)
-	cvdHist := NewStatRing(cfg.BufferSize)                 // recent |flush-window perp CVD| (USD)
-	fundingHist := NewStatRing(fundingLookbackWindows + 1) // funding values for the lookback read
 
 	// OI baselines for the 5-minute delta, carried across cycles.
 	var prevOKXOI, prevBybitOI float64
@@ -344,19 +323,15 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config,
 			humanUSD(curOKXOI), signedUSD(okxOIDelta), humanUSD(curBybitOI), signedUSD(bybitOIDelta),
 			curOKXFunding*100, curBybitFunding*100, oiStale)
 
-		// Feed the trailing histories EVERY cycle so the adaptive percentiles and the
-		// funding-trend lookback reflect the whole regime. combinedOI/Δ and the
-		// flush-window perp CVD are available without the liquidation aggregation.
+		// Combined OI and its 5-min delta drive the reversal/continuation label and the
+		// alert's OI% line; computed every cycle (incl. idle) so an eventual alert
+		// reflects the full window.
 		combinedOI := curOKXOI + curBybitOI
 		combinedOIDelta := okxOIDelta + bybitOIDelta
 		oiChangePct := 0.0
 		if combinedOI > 0 {
 			oiChangePct = combinedOIDelta / combinedOI * 100
 		}
-		flushCVD := flushWindowCVD(flow, time.Now())
-		oiDropHist.Add(math.Max(0, -oiChangePct)) // drop magnitude in %
-		cvdHist.Add(math.Abs(flushCVD))
-		fundingHist.Add(curBybitFunding)
 
 		data := aggregator.ExtractAndClear()
 		if len(data) == 0 {
@@ -423,97 +398,7 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, cfg Config,
 			formatExchangeBlock("🌐", "OKX", okx, curOKXFunding, curOKXOI, okxOIDelta),
 		)
 
-		// ─── Two-stage scoring injection (upgrade.md §4–§6) ──────────────────
-		// Single, additive hook into the existing alert path. Everything above is
-		// untouched (APPEND ONLY, rule 1 / D2): the existing logic already decided
-		// to alert; here we only enrich it with the T0 Setup Matrix and, on a
-		// qualifying score, start the cancelable T+N candle-sync confirmation.
-		bucketVol, _ := ring.Latest()
-		medianVol, medianOK := ring.Median()
-
-		// Adaptive references from the trailing histories (fed every cycle above).
-		volRank, volRankOK := ring.Rank(bucketVol)
-		oiDropRank, oiDropRankOK := oiDropHist.Rank(math.Max(0, -oiChangePct), cfg.AdaptiveMinSamples)
-		cvdRank, cvdRankOK := cvdHist.Rank(math.Abs(flushCVD), cfg.AdaptiveMinSamples)
-		fundingPrev, fundingHasHist := fundingHist.Ago(fundingLookbackWindows)
-		longsDominant := combinedLongUSDT >= combinedShortUSDT
-
-		score := ScoreSetup(cfg, SetupInputs{
-			OIChangePct:  oiChangePct,
-			LongLiqUSDT:  combinedLongUSDT,
-			ShortLiqUSDT: combinedShortUSDT,
-			FundingRate:  curBybitFunding, // PrimaryExchange (Bybit) funding
-			BucketVol:    bucketVol,
-			MedianVol:    medianVol,
-			VolMedianOK:  medianOK,
-
-			VolPctileRank:    volRank,
-			VolRankOK:        volRankOK,
-			OIDropPctileRank: oiDropRank,
-			OIDropRankOK:     oiDropRankOK,
-
-			PerpCVD:       flushCVD,
-			PerpActive:    flow.PerpActive(),
-			LongsDominant: longsDominant,
-			CVDPctileRank: cvdRank,
-			CVDRankOK:     cvdRankOK,
-
-			FundingPrev:       fundingPrev,
-			FundingHasHistory: fundingHasHist,
-		})
-		msg += FormatSetupMatrix(cfg, score)
-
-		// Log the RAW value behind each signal next to its threshold, so the gate
-		// can be calibrated from the real distribution of events rather than
-		// guessed. "vol" is n/a until the ring has MinBufferFill samples.
-		longShare := longLiqShare(combinedLongUSDT, combinedShortUSDT)
-		volRatio := 0.0
-		volRatioStr := "n/a(warming)"
-		if medianOK && medianVol > 0 {
-			volRatio = bucketVol / medianVol
-			volRatioStr = fmt.Sprintf("%.1fx", volRatio)
-		}
-		log.Printf("[ENGINE] T0 signals: score %d/%d | "+
-			"OI Δ %.2f%% (oiRank %.2f) %s | skew %.1f%% (bar ≥%.0f) %s | "+
-			"vol %s (volRank %.2f) %s | funding %.4f%% (prev %.4f%%) %s | "+
-			"perpCVD %s (cvdRank %.2f, longsDom %t) %s",
-			score.Total, score.Max,
-			oiChangePct, oiDropRank, passMark(score.OIDrop),
-			longShare, cfg.SkewPct, passMark(score.Skew),
-			volRatioStr, volRank, passMark(score.VolSpike),
-			curBybitFunding*100, fundingPrev*100, passMark(score.Funding),
-			signedUSD(flushCVD), cvdRank, longsDominant, cvdMark(score))
-
 		log.Printf("[ENGINE] Dispatching Telegram alert (combined impact %s)...", humanUSD(totalImpactUSDT))
 		telegram.DispatchTelegramAlert(token, chatID, msg)
-
-		// Outcome logging (#4): label this alert and measure its forward return so
-		// signal accuracy can be learned from real events. Reversal direction
-		// follows the flush side (long flush => reversal UP).
-		if outcome != nil && cfg.OutcomeLogEnabled {
-			outcome.Record(OutcomeSnapshot{
-				T0:            time.Now().UTC(),
-				BaselinePrice: bybitLast,
-				ReversalUp:    longsDominant,
-				Score:         score,
-				OIChangePct:   oiChangePct,
-				LongSharePct:  longShare,
-				VolRatio:      volRatio,
-				FundingPct:    curBybitFunding,
-				PerpCVD:       flushCVD,
-			})
-		}
-
-		// D3: confirmation only starts for meaningful (absolute-score) setups. A
-		// fresh qualifying T0 cancels any pending confirmation (§6.1).
-		if score.QualifiesForConfirmation(cfg) {
-			log.Printf("[ENGINE] T0 score %d >= gate %d — starting candle-sync confirmation.",
-				score.Total, cfg.StartConfirmationMinScore)
-			confMgr.Trigger(T0Snapshot{
-				FlushRangeHigh: bybit.max, // liquidation range top on PrimaryExchange (Bybit)
-				BaselinePrice:  bybitLast,
-				T0:             time.Now().UTC(),
-			})
-		}
 	}
 }

@@ -13,7 +13,7 @@ import (
 // Bybit v5 kline REST, used for the silent warm boot and as the fallback bar
 // source when the WebSocket is not delivering. This is the module's OWN client
 // (isolation rule 4: the existing bybit.FetchKlines is hardcoded to interval "5",
-// so we add a 3m source here rather than modifying it).
+// so we add our own timeframe-agnostic source here rather than modifying it).
 //
 // api.bytick.com is Bybit's official mirror and commonly answers when
 // api.bybit.com is geo-blocked (HTTP 403) from a given host — the WebSocket feed
@@ -40,19 +40,19 @@ type bybitKlineResp struct {
 	} `json:"result"`
 }
 
-// bybitInterval maps a "3m"-style timeframe to the Bybit v5 interval string
-// ("3"). Minute timeframes drop the trailing "m"; anything else is passed through.
+// bybitInterval maps a "1m"-style timeframe to the Bybit v5 interval string
+// ("1"). Minute timeframes drop the trailing "m"; anything else is passed through.
 func bybitInterval(timeframe string) string {
 	return strings.TrimSuffix(timeframe, "m")
 }
 
-// intervalDuration returns the timeframe as a Duration (e.g. "3m" -> 3 minutes),
-// defaulting to 3 minutes if it cannot be parsed.
+// intervalDuration returns the timeframe as a Duration (e.g. "1m" -> 1 minute),
+// defaulting to 1 minute if it cannot be parsed.
 func intervalDuration(timeframe string) time.Duration {
 	if d, err := time.ParseDuration(timeframe); err == nil && d > 0 {
 		return d
 	}
-	return 3 * time.Minute
+	return time.Minute
 }
 
 // fetchClosedBars fetches up to `limit` finalized (closed) bars ending at or
