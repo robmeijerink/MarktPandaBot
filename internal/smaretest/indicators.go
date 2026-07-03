@@ -151,39 +151,26 @@ func tightFlag(cfg Config, fw flagWindow) bool {
 	return fw.recentRange <= cfg.FlagContractionRatio*fw.earlierRange
 }
 
-// maxSeparationSinceCross returns how far price moved AWAY from the fast (21) SMA,
-// in the trend direction, at its furthest point since the most recent fast/slow
-// cross — as a fraction of price. For a long it is the largest (High-fast)/fast; for
-// a short the largest (fast-Low)/fast. It mirrors barsSinceLastCross: it scans the
-// ready window, finds the last sign flip of (fast-slow), then measures the peak
-// excursion from that bar onward. Used to seed the live state after a silent warm
-// boot so a setup that already separated before startup can still fire.
-func (in *indicators) maxSeparationSinceCross(fast, slow int) float64 {
+// recentSeparations returns the per-bar separation of price from the fast (21) SMA,
+// in the given trend direction, for up to the last `window` bars (chronological). For
+// a long each value is (High-fast)/fast; for a short (fast-Low)/fast; excursions on
+// the wrong side are clamped to 0. It seeds the live flagpole ring after a silent
+// warm boot so a pole that formed just before startup is still counted. It is the
+// history-scan analogue of the machine's live per-bar pole ring.
+func (in *indicators) recentSeparations(fastPeriod, window, regime int) []float64 {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	n := len(in.bars)
-	if n < slow {
-		return 0
+	out := make([]float64, 0, window)
+	if window <= 0 || fastPeriod <= 0 {
+		return out
 	}
-	lastIdx := n - 1
-	crossIdx := slow - 1
-	prevSign := 0
-	for idx := slow - 1; idx <= lastIdx; idx++ {
-		f, okF := smaAt(in.bars, fast, idx)
-		s, okS := smaAt(in.bars, slow, idx)
-		if !okF || !okS {
-			continue
-		}
-		sign := sign2(f - s)
-		if prevSign != 0 && sign != prevSign {
-			crossIdx = idx
-		}
-		prevSign = sign
+	start := n - window
+	if start < fastPeriod-1 {
+		start = fastPeriod - 1 // need enough history for the fast SMA
 	}
-	regime := prevSign // sign of (fast-slow) at the most recent bar
-	maxSep := 0.0
-	for idx := crossIdx; idx <= lastIdx; idx++ {
-		f, ok := smaAt(in.bars, fast, idx)
+	for idx := start; idx < n; idx++ {
+		f, ok := smaAt(in.bars, fastPeriod, idx)
 		if !ok || f <= 0 {
 			continue
 		}
@@ -193,11 +180,12 @@ func (in *indicators) maxSeparationSinceCross(fast, slow int) float64 {
 		} else {
 			sep = (f - in.bars[idx].Low) / f
 		}
-		if sep > maxSep {
-			maxSep = sep
+		if sep < 0 {
+			sep = 0
 		}
+		out = append(out, sep)
 	}
-	return maxSep
+	return out
 }
 
 // smaAt computes the simple moving average of closes ending at endIdx (inclusive)

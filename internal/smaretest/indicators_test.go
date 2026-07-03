@@ -110,20 +110,35 @@ func TestFlagTight(t *testing.T) {
 
 // TestMaxSeparationSinceCross verifies the warm-boot seed: the peak excursion of
 // price from the 21 SMA, in the trend direction, since the most recent cross.
-func TestMaxSeparationSinceCross(t *testing.T) {
+func TestRecentSeparations(t *testing.T) {
+	// Rising series: price runs above the fast SMA => positive separations, clamped
+	// to the recency window.
 	in := &indicators{cap: 100}
-	// fast=2, slow=3. Dip then a strong rally so SMA2 crosses above SMA3 (LONG), with
-	// price running well above the fast SMA after the cross.
-	pushCloses(in, 10, 9, 8, 7, 6, 8, 11, 15)
-	sep := in.maxSeparationSinceCross(2, 3)
-	if sep <= 0 {
-		t.Fatalf("a long leg above the 21 SMA should report positive separation, got %.4f", sep)
+	pushCloses(in, 6, 7, 8, 10, 13, 17)
+	seps := in.recentSeparations(2, 4, regimeLong)
+	if len(seps) == 0 || len(seps) > 4 {
+		t.Fatalf("window=4 should return 1..4 values, got %d", len(seps))
 	}
-	// Flat series => no separation.
+	maxSep := 0.0
+	for _, s := range seps {
+		if s < 0 {
+			t.Fatalf("separations must be clamped to >= 0, got %.4f", s)
+		}
+		if s > maxSep {
+			maxSep = s
+		}
+	}
+	if maxSep <= 0 {
+		t.Fatalf("a rising leg should produce a positive separation, got %.4f", maxSep)
+	}
+
+	// Flat series => zero separation on every bar.
 	in2 := &indicators{cap: 100}
 	pushCloses(in2, 100, 100, 100, 100, 100)
-	if s := in2.maxSeparationSinceCross(2, 3); s != 0 {
-		t.Fatalf("a flat series has no separation, got %.4f", s)
+	for _, s := range in2.recentSeparations(2, 10, regimeLong) {
+		if s != 0 {
+			t.Fatalf("a flat series has no separation, got %.4f", s)
+		}
 	}
 }
 

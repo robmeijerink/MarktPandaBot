@@ -97,9 +97,9 @@ func armFromHistory(cfg Config, ind *indicators, m *machine) {
 	m.reArmed = true // first qualifying live bar may fire even though the cross is historical
 	m.prevFast, m.prevSlow, m.havePrev = fast, slow, true
 	m.barsSinceCross = ind.barsSinceLastCross(cfg.FastPeriod, cfg.SlowPeriod)
-	// Seed the move-away peak from history so a setup that already separated from the
-	// 21 SMA before startup can still fire on the first qualifying live retest.
-	m.maxSep = ind.maxSeparationSinceCross(cfg.FastPeriod, cfg.SlowPeriod)
+	// Seed the flagpole ring from recent history so a pole that formed just before
+	// startup is not forgotten and the first qualifying live kiss can still fire.
+	m.poleRing = ind.recentSeparations(cfg.FastPeriod, cfg.PoleWindow, m.regime)
 }
 
 // restFallback polls one closed bar per timeframe boundary, but ONLY when the

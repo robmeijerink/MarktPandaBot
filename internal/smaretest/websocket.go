@@ -32,14 +32,14 @@ type wsKlineMsg struct {
 	Data  []wsKlineEntry `json:"data"`
 }
 
-// runKlineWS maintains the primary 3m kline WebSocket subscription and pushes one
+// runKlineWS maintains the primary kline WebSocket subscription and pushes one
 // Bar per finalized (confirm) candle onto barCh. It reconnects forever; it never
 // touches the existing liquidation/ticker WS handlers. Bars are de-duplicated by
 // the consumer, so a brief overlap with the REST fallback is harmless.
 func runKlineWS(cfg Config, barCh chan<- Bar) {
 	topic := "kline." + bybitInterval(cfg.Timeframe) + "." + cfg.Symbol
 	for {
-		log.Printf("[SMARETEST] Connecting to 3m kline WS: %s (%s)", bybitWSURL, topic)
+		log.Printf("[SMARETEST] Connecting to %s kline WS: %s (%s)", cfg.Timeframe, bybitWSURL, topic)
 		conn, _, err := websocket.DefaultDialer.Dial(bybitWSURL, nil)
 		if err != nil {
 			log.Printf("[SMARETEST] Kline WS dial error: %v. Reconnecting in %s...", err, wsReconnectDelay)

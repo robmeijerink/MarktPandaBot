@@ -31,45 +31,57 @@ const (
 type Config struct {
 	PrimaryExchange string // "bybit"
 	Symbol          string // "BTCUSDT" (perp)
-	Timeframe       string // "3m"
+	Timeframe       string // "1m" — the timeframe Sam Price / CryptoLifer runs this model on
 	FastPeriod      int    // 21
 	SlowPeriod      int    // 200
-	WarmBootBars    int    // 300 — must be >= SlowPeriod plus headroom
+	WarmBootBars    int    // 400 — must be >= SlowPeriod plus headroom (1m crosses are frequent)
 
 	Directions string // "both" (locked) | "long" | "short"
 
 	// Touch band around the 21 SMA (TUNABLE).
 	UseATRTolerance bool    // false — if true use ATRMult*ATR, else pct band
-	TouchTolPct     float64 // 0.05 — percent band (0.05 = 0.05%)
+	TouchTolPct     float64 // 0.04 — percent band (0.04 = 0.04%); tighter on 1m than the old 3m value
 	ATRPeriod       int     // 14
 	ATRMult         float64 // 0.25
 
-	// Move-away gate (TUNABLE). The CryptoLifer "model" does not enter on every 21
-	// SMA touch — after the 21/200 cross it first wants price to MOVE AWAY from the
-	// lines, then go sideways and tighten, and only then takes the pullback touch of
-	// the 21 SMA as the entry. MinSeparationPct is that move-away requirement: price
-	// must have reached at least this far from the 21 SMA (in the trend direction)
-	// AT SOME POINT since the cross before a touch-back counts. This replaces the old
-	// fixed-position "flagpole" check, which demanded the impulse sit at an exact bar
-	// offset before the touch and so suppressed setups whose consolidation ran long.
-	MinSeparationPct float64 // 0.3 — price must move >= this % away from the 21 SMA since the cross
+	// Flagpole gate (TUNABLE). Sam Price's "model" enters on a pullback that KISSES
+	// the 21 SMA, but only after a real flagpole: a sudden, aggressive move in the
+	// trend direction that overextends price away from the 21 and leaves a gap. These
+	// two knobs encode that pole. MinSeparationPct is how far price must have reached
+	// from the 21 SMA (in the trend direction) — the depth of the gap. PoleWindow is
+	// how RECENTLY that overextension must have happened: the peak must fall inside the
+	// last PoleWindow bars, which also stands in for "aggressive" (covering the gap
+	// within a short window IS an impulse; a slow drift never reaches the depth in
+	// time). The kiss bar itself is excluded, so the pole is always a PRIOR move and
+	// the touch proves the return. Disable with RequirePole=false.
+	RequirePole      bool    // true — require a recent flagpole before the kiss
+	MinSeparationPct float64 // 0.2 — the flagpole must have reached >= this % away from the 21 SMA
+	PoleWindow       int     // 20 — bars; the overextension must have peaked within this many recent bars
 
-	// Tight-flag entry gate (TUNABLE). After the move-away, the model wants a
-	// CONSOLIDATION that is getting tight (volatility compressing). These knobs gate
-	// the touch on that contracting range so we alert when the model is actually
-	// playing out, not on every pullback to the mean.
-	RequireTightFlag     bool    // true — suppress touches without a tight, contracting range into the touch
+	// Tight-flag / pennant gate (OPTIONAL, off by default). Some pullbacks pause in a
+	// tight, contracting pennant before the kiss; others are a sharp micro-V straight
+	// back to the 21. On 1m BTC the V is common and waiting for a multi-bar
+	// consolidation to confirm makes the entry too late, so this gate is OFF by
+	// default — the flagpole + kiss are the model. Turn it on to additionally require
+	// a contracting range into the touch.
+	RequireTightFlag     bool    // false — if true, also require a tight, contracting range into the touch
 	FlagLookback         int     // 12 — bars (ending just before the touch bar) that form the range
-	FlagMaxRangePct      float64 // 0.5 — recent-half range height must be <= this % of price (tight NOW)
-	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (getting tighter)
+	FlagMaxRangePct      float64 // 0.3 — recent-half range height must be <= this % of price (only used when RequireTightFlag)
+	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (only used when RequireTightFlag)
 
 	// Re-arm / anti-spam (TUNABLE).
 	ReArmMode        string // "debounce" (default) | "firstOnly"
 	EmitInvalidation bool   // false — send a note when price reaches the 200 SMA
 
-	BarCloseGraceSec int // 5 — wait after candle close before reading the finalized kline
+	BarCloseGraceSec int // 3 — wait after candle close before reading the finalized kline (1m settles fast)
 
-	// Operational knobs for the 3m source (not part of the signal).
+	// Outcome logging (measurement, not part of the signal). For each fired retest the
+	// module logs the entry feature vector and the realised forward return at these
+	// horizons, so the 1m signal's real hit-rate can be measured from the logs instead
+	// of eyeballed. Empty disables it.
+	OutcomeHorizonsMin []int // {15, 30, 60} — forward-return horizons in minutes
+
+	// Operational knobs for the kline source (not part of the signal).
 	KlineFetchTimeoutSec int // 10 — REST HTTP client timeout
 	KlineMaxRetries      int // 3  — warm-boot fetch retries before giving up
 }
@@ -79,23 +91,26 @@ func DefaultConfig() Config {
 	return Config{
 		PrimaryExchange:      "bybit",
 		Symbol:               "BTCUSDT",
-		Timeframe:            "3m",
+		Timeframe:            "1m",
 		FastPeriod:           21,
 		SlowPeriod:           200,
-		WarmBootBars:         300,
+		WarmBootBars:         400,
 		Directions:           DirBoth,
 		UseATRTolerance:      false,
-		TouchTolPct:          0.05,
+		TouchTolPct:          0.04,
 		ATRPeriod:            14,
 		ATRMult:              0.25,
-		MinSeparationPct:     0.3,
-		RequireTightFlag:     true,
+		RequirePole:          true,
+		MinSeparationPct:     0.2,
+		PoleWindow:           20,
+		RequireTightFlag:     false,
 		FlagLookback:         12,
-		FlagMaxRangePct:      0.5,
+		FlagMaxRangePct:      0.3,
 		FlagContractionRatio: 0.8,
 		ReArmMode:            ReArmDebounce,
 		EmitInvalidation:     false,
-		BarCloseGraceSec:     5,
+		BarCloseGraceSec:     3,
+		OutcomeHorizonsMin:   []int{15, 30, 60},
 		KlineFetchTimeoutSec: 10,
 		KlineMaxRetries:      3,
 	}

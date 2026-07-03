@@ -17,8 +17,8 @@ func bar(o, h, l, c float64) Bar { return Bar{Open: o, High: h, Low: l, Close: c
 
 // ctx assembles a barCtx with explicit indicator readings so the decision logic
 // can be tested without engineering 200-bar SMA series. flagTight defaults to true
-// so touch tests exercise the touch geometry; the move-away (separation) gate is
-// driven by the machine's maxSep state and has its own dedicated test.
+// so the optional pennant gate never blocks; the flagpole gate is driven by the
+// machine's poleRing state and has its own dedicated test.
 func ctx(fast, slow, prevFast, prevSlow, band float64, b Bar) barCtx {
 	return barCtx{fast: fast, slow: slow, prevFast: prevFast, prevSlow: prevSlow, havePrev: true, band: band, bar: b, flagTight: true}
 }
@@ -67,7 +67,7 @@ func TestWickOutRejection(t *testing.T) {
 
 	// LONG, armed: low pierces (<= fast+band) but close below fast => rejected.
 	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.maxSep = regimeLong, true, true, 1 // separation satisfied
+	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
 	m.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.04, 99.90, 99.95))) // close < fast
 	if len(*sent) != 0 {
 		t.Fatalf("wick-out (close below SMA) must not fire LONG, got %d alerts", len(*sent))
@@ -75,7 +75,7 @@ func TestWickOutRejection(t *testing.T) {
 
 	// LONG, armed: low touches band and close back above fast => fires.
 	m2, sent2 := testMachine(t, cfg)
-	m2.regime, m2.armed, m2.reArmed, m2.maxSep = regimeLong, true, true, 1
+	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, []float64{1}
 	m2.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01))) // low<=100.05, close>=100
 	if len(*sent2) != 1 {
 		t.Fatalf("valid LONG touch should fire exactly 1 alert, got %d", len(*sent2))
@@ -83,7 +83,7 @@ func TestWickOutRejection(t *testing.T) {
 
 	// SHORT, armed: high pierces but close above fast => rejected.
 	m3, sent3 := testMachine(t, cfg)
-	m3.regime, m3.armed, m3.reArmed, m3.maxSep = regimeShort, true, true, 1
+	m3.regime, m3.armed, m3.reArmed, m3.poleRing = regimeShort, true, true, []float64{1}
 	m3.decide(ctx(100, 110, 100, 110, band, bar(99.98, 100.10, 99.96, 100.05))) // close > fast
 	if len(*sent3) != 0 {
 		t.Fatalf("wick-out (close above SMA) must not fire SHORT, got %d alerts", len(*sent3))
@@ -91,7 +91,7 @@ func TestWickOutRejection(t *testing.T) {
 
 	// SHORT, armed: high touches band and close back below fast => fires.
 	m4, sent4 := testMachine(t, cfg)
-	m4.regime, m4.armed, m4.reArmed, m4.maxSep = regimeShort, true, true, 1
+	m4.regime, m4.armed, m4.reArmed, m4.poleRing = regimeShort, true, true, []float64{1}
 	m4.decide(ctx(100, 110, 100, 110, band, bar(99.98, 100.03, 99.94, 99.99)))
 	if len(*sent4) != 1 {
 		t.Fatalf("valid SHORT touch should fire exactly 1 alert, got %d", len(*sent4))
@@ -135,7 +135,7 @@ func TestReArmDebounce(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReArmMode = ReArmDebounce
 	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.maxSep = regimeLong, true, true, 1 // separation satisfied
+	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
 
 	// Bar A: valid touch => fires, reArmed=false.
 	m.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
@@ -162,7 +162,7 @@ func TestReArmDebounce(t *testing.T) {
 	cfgF := DefaultConfig()
 	cfgF.ReArmMode = ReArmFirstOnly
 	mf, sentF := testMachine(t, cfgF)
-	mf.regime, mf.armed, mf.reArmed, mf.maxSep = regimeLong, true, true, 1
+	mf.regime, mf.armed, mf.reArmed, mf.poleRing = regimeLong, true, true, []float64{1}
 	mf.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
 	if len(*sentF) != 1 || mf.armed {
 		t.Fatalf("firstOnly should fire once and disarm: alerts=%d armed=%v", len(*sentF), mf.armed)
@@ -179,7 +179,7 @@ func TestSameBarExclusivity(t *testing.T) {
 	band := 0.05
 
 	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.maxSep = regimeLong, true, true, 1 // separation satisfied; isolate arm-state logic
+	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied; isolate arm-state logic
 	// Not re-armed at start; a single bar that both touches and closes outside the
 	// band must NOT fire (touch uses armedAtStart) but SHOULD re-arm for next bar.
 	m.reArmed = false
@@ -235,93 +235,92 @@ func TestWarmBootSilentThenFire(t *testing.T) {
 	}
 }
 
-// Test 7: tight-flag gate — a valid geometric touch does NOT fire unless the
-// preceding consolidation is a tight flag, and a suppressed touch leaves the setup
-// ARMED so a later tight-flag touch still fires.
+// Test 7: optional tight-flag/pennant gate — with RequireTightFlag ON, a valid
+// flagpole+kiss is still suppressed unless the pullback is a tight range (arm
+// preserved so a later tight touch fires); with it OFF (the default) the pennant is
+// not required and a sharp (non-tight) kiss fires.
 func TestTightFlagGate(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.ReArmMode = ReArmDebounce // so the first touch does not disarm the regime
 	band := 0.05
 	touch := bar(100.02, 100.06, 99.97, 100.01) // low<=fast+band, close>=fast
 
-	// flagTight=false: geometric touch is suppressed and the arm is NOT consumed.
+	// RequireTightFlag ON, pole satisfied, flag NOT tight => suppressed, arm preserved.
+	cfg := DefaultConfig()
+	cfg.RequireTightFlag = true
+	cfg.ReArmMode = ReArmDebounce // so the suppressed touch does not disarm the regime
 	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.maxSep = regimeLong, true, true, 1 // separation satisfied; isolate the flag gate
+	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied; isolate the flag gate
 	c := ctx(100, 90, 100, 90, band, touch)
 	c.flagTight = false
 	m.decide(c)
 	if len(*sent) != 0 {
-		t.Fatalf("touch without a tight flag must not fire, got %d", len(*sent))
+		t.Fatalf("touch without a tight pennant must not fire when RequireTightFlag is on, got %d", len(*sent))
 	}
 	if !m.reArmed {
 		t.Fatalf("suppressed touch must leave the setup armed to keep waiting")
 	}
 
-	// Same machine, next qualifying bar WITH a tight flag => fires.
+	// Same machine, next qualifying bar WITH a tight flag => fires (pole ring still deep).
 	m.decide(ctx(100, 90, 100, 90, band, touch)) // ctx() sets flagTight=true
 	if len(*sent) != 1 {
-		t.Fatalf("tight-flag touch should fire exactly once, got %d", len(*sent))
+		t.Fatalf("tight-pennant touch should fire exactly once, got %d", len(*sent))
 	}
 
-	// RequireTightFlag=false: the gate is bypassed entirely.
-	cfg2 := DefaultConfig()
-	cfg2.RequireTightFlag = false
+	// RequireTightFlag OFF (default): a non-tight kiss with a pole fires immediately.
+	cfg2 := DefaultConfig() // RequireTightFlag defaults false
 	m2, sent2 := testMachine(t, cfg2)
-	m2.regime, m2.armed, m2.reArmed = regimeLong, true, true
+	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, []float64{1}
 	c2 := ctx(100, 90, 100, 90, band, touch)
 	c2.flagTight = false
 	m2.decide(c2)
 	if len(*sent2) != 1 {
-		t.Fatalf("with RequireTightFlag=false the touch should fire, got %d", len(*sent2))
+		t.Fatalf("with RequireTightFlag=false the kiss should fire, got %d", len(*sent2))
 	}
 }
 
-// Test 8: separation gate in decide — a tight-range touch where price never moved
-// far enough from the 21 SMA since the cross is suppressed (and leaves the setup
-// armed); once separation is satisfied it fires; RequireTightFlag=false bypasses both.
-func TestSeparationGate(t *testing.T) {
+// Test 8: flagpole gate — a kiss with no recent flagpole in the ring is suppressed
+// (arm preserved); once the ring holds a deep-enough overextension it fires; a
+// sub-threshold pole stays suppressed; RequirePole=false bypasses the gate.
+func TestFlagpoleGate(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReArmMode = ReArmDebounce  // so a suppressed touch does not disarm the regime
-	cfg.MinSeparationPct = 0.3     // price must reach >= 0.3% away from the 21 SMA
+	cfg.ReArmMode = ReArmDebounce // so a suppressed touch does not disarm the regime
+	cfg.MinSeparationPct = 0.3    // the pole must have reached >= 0.3% from the 21 SMA
 	band := 0.05
 	touch := bar(100.02, 100.06, 99.97, 100.01) // low<=fast+band, close>=fast
 
-	// Tight range but price never separated (maxSep=0) => suppressed, arm preserved.
+	// Empty ring => no flagpole => suppressed, arm preserved.
 	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.maxSep = regimeLong, true, true, 0
+	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, nil
 	m.decide(ctx(100, 90, 100, 90, band, touch)) // flagTight=true from ctx()
 	if len(*sent) != 0 {
-		t.Fatalf("a tight-range touch with no move-away must not fire, got %d", len(*sent))
+		t.Fatalf("a kiss with no recent flagpole must not fire, got %d", len(*sent))
 	}
 	if !m.reArmed {
-		t.Fatalf("suppressed (no-separation) touch must leave the setup armed")
+		t.Fatalf("suppressed (no-pole) touch must leave the setup armed")
 	}
 
-	// Now price has moved 0.5% away from the 21 since the cross => next touch fires.
-	m.maxSep = 0.005
+	// Ring now holds a 0.5% overextension => next kiss fires.
+	m.poleRing = []float64{0.005}
 	m.decide(ctx(100, 90, 100, 90, band, touch))
 	if len(*sent) != 1 {
-		t.Fatalf("move-away + tight-range touch should fire exactly once, got %d", len(*sent))
+		t.Fatalf("flagpole + kiss should fire exactly once, got %d", len(*sent))
 	}
 
-	// A separation just under the threshold is still suppressed.
+	// A pole just under the threshold stays suppressed.
 	mu, sentU := testMachine(t, cfg)
-	mu.regime, mu.armed, mu.reArmed, mu.maxSep = regimeLong, true, true, 0.0029 // 0.29% < 0.30%
+	mu.regime, mu.armed, mu.reArmed, mu.poleRing = regimeLong, true, true, []float64{0.0029} // 0.29% < 0.30%
 	mu.decide(ctx(100, 90, 100, 90, band, touch))
 	if len(*sentU) != 0 {
-		t.Fatalf("sub-threshold separation (0.29%% < 0.30%%) must not fire, got %d", len(*sentU))
+		t.Fatalf("sub-threshold pole (0.29%% < 0.30%%) must not fire, got %d", len(*sentU))
 	}
 
-	// RequireTightFlag=false bypasses the separation gate too.
+	// RequirePole=false bypasses the flagpole gate entirely.
 	cfg2 := DefaultConfig()
-	cfg2.RequireTightFlag = false
+	cfg2.RequirePole = false
 	m2, sent2 := testMachine(t, cfg2)
-	m2.regime, m2.armed, m2.reArmed, m2.maxSep = regimeLong, true, true, 0
-	c2 := ctx(100, 90, 100, 90, band, touch)
-	c2.flagTight = false
-	m2.decide(c2)
+	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, nil
+	m2.decide(ctx(100, 90, 100, 90, band, touch))
 	if len(*sent2) != 1 {
-		t.Fatalf("with RequireTightFlag=false the touch should fire, got %d", len(*sent2))
+		t.Fatalf("with RequirePole=false the kiss should fire, got %d", len(*sent2))
 	}
 }
 

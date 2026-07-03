@@ -65,6 +65,7 @@ func TestFetchClosedBarsOrderAndInProgress(t *testing.T) {
 	defer setBases(srv.URL)()
 
 	cfg := DefaultConfig()
+	cfg.Timeframe = "3m" // makeHistory / the in-progress bar are built on 3m boundaries
 	got, err := fetchClosedBars(httpTestClient(), cfg, 0, 10)
 	if err != nil {
 		t.Fatalf("fetchClosedBars error: %v", err)
