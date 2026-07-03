@@ -16,9 +16,9 @@ func TestComma(t *testing.T) {
 	}
 }
 
-// TestRenderSamples prints a fully-rendered raw liquidation alert so alignment can
-// be eyeballed in a monospace terminal (go test -v -run RenderSamples). It is not an
-// assertion test beyond confirming the tables are wrapped in a code fence.
+// TestRenderSamples prints a fully-rendered raw liquidation alert so it can be
+// eyeballed (go test -v -run RenderSamples). It is not an assertion test beyond a
+// basic sanity check on the per-venue bullet block.
 func TestRenderSamples(t *testing.T) {
 	bybit := legStats{
 		count: 633, volBTC: 167.55, volUSDT: 10_600_000,
@@ -32,18 +32,16 @@ func TestRenderSamples(t *testing.T) {
 	}
 
 	alert := "🚨 *LIQUIDATION ALERT*\n\n" +
-		"🔄 Potential REVERSAL UP — long capitulation\n" +
-		"_OI -0.95%  ·  BTC $" + comma(63681) + "  ·  -4.7% 24h_\n" +
+		"*🔄 Potential REVERSAL UP — long capitulation*\n\n" +
+		"📈 OI -0.95%  ·  BTC $" + comma(63681) + "  ·  -4.7% 24h\n\n" +
 		"⚠️ Combined ~" + humanUSD(11_100_000) + " liquidated in the last 5m\n\n" +
-		"```\n" +
 		formatExchangeBlock("📍", "BYBIT", bybit, -0.000018, 3_730_000_000, -40_500_000) +
 		"\n\n" +
-		formatExchangeBlock("🌐", "OKX", okx, 0.000092, 2_420_000_000, -18_000_000) +
-		"\n```"
+		formatExchangeBlock("🌐", "OKX", okx, 0.000092, 2_420_000_000, -18_000_000)
 
 	t.Log("\n" + alert)
 
-	if !strings.Contains(alert, "```") {
-		t.Fatal("alert not wrapped in a code fence")
+	if !strings.Contains(alert, "• Liq: 🔴 ~$10.6M | 🟢 ~$0") {
+		t.Fatal("per-venue bullet block not rendered as expected")
 	}
 }

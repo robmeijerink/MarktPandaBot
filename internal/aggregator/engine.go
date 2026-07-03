@@ -384,14 +384,14 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 		totalImpactUSDT := okx.volUSDT + bybit.volUSDT
 		bybitPctDisplay := bybitPct24h * 100 // price24hPcnt is a fraction
 
-		// Title + signal stay outside the code fence so bold/emoji render; the
-		// per-venue tables go inside one ``` block so every column lines up.
+		// Header (title, signal, OI/price context, combined total) followed by the two
+		// per-venue bullet blocks. No code fence — the blocks are proportional-font.
 		msg := fmt.Sprintf(
 			"🚨 *LIQUIDATION ALERT*\n\n"+
 				"*%s*\n\n"+
 				"📈 OI %+.2f%%  ·  BTC $%s  ·  %+.1f%% 24h\n\n"+
 				"⚠️ Combined ~%s liquidated in the last 5m\n\n"+
-				"```\n%s\n\n%s\n```",
+				"%s\n\n%s",
 			signalLabel, oiChangePct, comma(bybitLast), bybitPctDisplay,
 			humanUSD(totalImpactUSDT),
 			formatExchangeBlock("📍", "BYBIT", bybit, curBybitFunding, curBybitOI, bybitOIDelta),

@@ -77,23 +77,27 @@ The idea is mechanical, not pattern-matching, and follows the CryptoLifer / Sam 
 
 ```markdown
 🚨 LIQUIDATION ALERT
-⚠️ Combined (OKX & Bybit): ~$420k liquidated in the past 5 minutes.
-📊 BTC $71590 (-2.6% 24h)
 
-🌐 OKX (Total: ~$293k / 4.10 ₿)
-🔴 Longs: ~$272k   🟢 Shorts: ~$21k
-Ord: 12   Biggest: ~$61k long
-Rng: 71400 - 71800
-Fund: 0.0100%   OI: $2.56B (Δ +$12.3M)
+🔄 Likely REVERSAL UP — long capitulation
 
-📍 BYBIT (Total: ~$240k)
-🔴 Longs: ~$210k   🟢 Shorts: ~$30k
-Ord: 8   Biggest: ~$40k long
-Rng: 71390 - 71810
-Fund: 0.0120%   OI: $4.29B (Δ -$5.1M)
+📈 OI -1.62%  ·  BTC $58,238  ·  -2.6% 24h
+
+⚠️ Combined ~$11.7M liquidated in the last 5m
+
+📍 BYBIT: ~$11.6M (201.14 ₿)
+• Liq: 🔴 ~$11.3M | 🟢 ~$307k
+• Max: 🔴 ~$2.6M (654 orders)
+• Rng: 57,442 - 58,526
+• Fund: +0.0031% | OI: $3.57B (Δ -$52.8M)
+
+🌐 OKX: ~$116k (2.00 ₿)
+• Liq: 🔴 ~$83k | 🟢 ~$33k
+• Max: 🔴 ~$26k (40 orders)
+• Rng: 57,543 - 58,465
+• Fund: +0.0041% | OI: $2.04B (Δ -$38.1M)
 ```
 
-> The values above are illustrative. The alert ends with the per-venue tables — there is no score, matrix, or follow-up confirmation.
+> The values above are illustrative. Each venue is a compact bullet block (no monospace code fence); the alert ends after the second venue — there is no score, matrix, or follow-up confirmation.
 
 The independent SMA retest module sends its own message, with a distinct `📐` prefix so it stays readable in the same feed:
 
