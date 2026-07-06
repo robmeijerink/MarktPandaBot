@@ -58,13 +58,12 @@ type Config struct {
 	MinSeparationPct float64 // 0.2 — the flagpole must have reached >= this % away from the 21 SMA
 	PoleWindow       int     // 20 — bars; the overextension must have peaked within this many recent bars
 
-	// Tight-flag / pennant gate (OPTIONAL, off by default). Some pullbacks pause in a
-	// tight, contracting pennant before the kiss; others are a sharp micro-V straight
-	// back to the 21. On 1m BTC the V is common and waiting for a multi-bar
-	// consolidation to confirm makes the entry too late, so this gate is OFF by
-	// default — the flagpole + kiss are the model. Turn it on to additionally require
-	// a contracting range into the touch.
-	RequireTightFlag     bool    // false — if true, also require a tight, contracting range into the touch
+	// Tight-flag / pennant gate (ON by default). A kiss only fires once the pullback
+	// has formed a real flag: a tight, contracting range in the bars just before the
+	// touch. This is what stops the alert firing on the very FIRST poke at the 21 after
+	// the pole (a sharp micro-V with no consolidation) — it waits for price to settle
+	// into a flag first. Turn it off to also take those immediate V-shape kisses.
+	RequireTightFlag     bool    // true — require a tight, contracting range (a flag) into the touch
 	FlagLookback         int     // 12 — bars (ending just before the touch bar) that form the range
 	FlagMaxRangePct      float64 // 0.3 — recent-half range height must be <= this % of price (only used when RequireTightFlag)
 	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (only used when RequireTightFlag)
@@ -103,7 +102,7 @@ func DefaultConfig() Config {
 		RequirePole:          true,
 		MinSeparationPct:     0.2,
 		PoleWindow:           20,
-		RequireTightFlag:     false,
+		RequireTightFlag:     true,
 		FlagLookback:         12,
 		FlagMaxRangePct:      0.3,
 		FlagContractionRatio: 0.8,

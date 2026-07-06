@@ -265,8 +265,9 @@ func TestTightFlagGate(t *testing.T) {
 		t.Fatalf("tight-pennant touch should fire exactly once, got %d", len(*sent))
 	}
 
-	// RequireTightFlag OFF (default): a non-tight kiss with a pole fires immediately.
-	cfg2 := DefaultConfig() // RequireTightFlag defaults false
+	// RequireTightFlag OFF: a non-tight kiss with a pole fires immediately.
+	cfg2 := DefaultConfig()
+	cfg2.RequireTightFlag = false
 	m2, sent2 := testMachine(t, cfg2)
 	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, []float64{1}
 	c2 := ctx(100, 90, 100, 90, band, touch)

@@ -18,9 +18,9 @@ func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
 				"Touch low: %.2f\n"+
 				"Room to 200 SMA: %.2f%%\n"+
 				"Flagpole: %.2f%% overextension (within last %d bars)\n"+
-				"Pullback range: %.2f%% over %d bars\n"+
+				"Flag: %.2f%% tight range over %d bars\n"+
 				"Regime: %d bars since golden cross\n"+
-				"Flagpole + kiss of the 21 SMA (support held) — model entry.",
+				"Flagpole + flag + kiss of the 21 SMA (support held) — model entry.",
 			cfg.Timeframe, displaySymbol(cfg.Symbol), c.bar.Close,
 			c.fast, c.slow, c.bar.Low, roomPct, c.sepPct, cfg.PoleWindow, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
 	}
@@ -31,9 +31,9 @@ func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
 			"Touch high: %.2f\n"+
 			"Room to 200 SMA: %.2f%%\n"+
 			"Flagpole: %.2f%% overextension (within last %d bars)\n"+
-			"Pullback range: %.2f%% over %d bars\n"+
+			"Flag: %.2f%% tight range over %d bars\n"+
 			"Regime: %d bars since death cross\n"+
-			"Flagpole + kiss of the 21 SMA (resistance held) — model entry.",
+			"Flagpole + flag + kiss of the 21 SMA (resistance held) — model entry.",
 		cfg.Timeframe, displaySymbol(cfg.Symbol), c.bar.Close,
 		c.fast, c.slow, c.bar.High, roomPct, c.sepPct, cfg.PoleWindow, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
 }
