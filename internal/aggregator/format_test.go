@@ -41,7 +41,7 @@ func TestRenderSamples(t *testing.T) {
 
 	t.Log("\n" + alert)
 
-	if !strings.Contains(alert, "• Liq: 🔴 ~$10.6M | 🟢 ~$0") {
-		t.Fatal("per-venue bullet block not rendered as expected")
+	if !strings.Contains(alert, "🔴 Long ~$10.6M\n🟢 Short ~$0") {
+		t.Fatal("per-venue block not rendered as expected")
 	}
 }

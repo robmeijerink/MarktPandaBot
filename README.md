@@ -85,19 +85,23 @@ The idea is mechanical, not pattern-matching, and follows the CryptoLifer / Sam 
 ⚠️ Combined ~$11.7M liquidated in the last 5m
 
 📍 BYBIT: ~$11.6M (201.14 ₿)
-• Liq: 🔴 ~$11.3M | 🟢 ~$307k
-• Max: 🔴 ~$2.6M (654 orders)
-• Rng: 57,442 - 58,526
-• Fund: +0.0031% | OI: $3.57B (Δ -$52.8M)
+🔴 Long ~$11.3M
+🟢 Short ~$307k
+🎯 Max ~$2.6M (654 orders)
+📏 Rng 57,442 - 58,526
+💰 Fund +0.0031% · OI $3.57B (Δ -$52.8M)
 
 🌐 OKX: ~$116k (2.00 ₿)
-• Liq: 🔴 ~$83k | 🟢 ~$33k
-• Max: 🔴 ~$26k (40 orders)
-• Rng: 57,543 - 58,465
-• Fund: +0.0041% | OI: $2.04B (Δ -$38.1M)
+🔴 Long ~$83k
+🟢 Short ~$33k
+🎯 Max ~$26k (40 orders)
+📏 Rng 57,543 - 58,465
+💰 Fund +0.0041% · OI $2.04B (Δ -$38.1M)
 ```
 
-> The values above are illustrative. Each venue is a compact bullet block (no monospace code fence); the alert ends after the second venue — there is no score, matrix, or follow-up confirmation.
+> The values above are illustrative. Each venue is a compact block with a leading icon on every line so they read at a glance; the alert ends after the second venue — there is no score, matrix, or follow-up confirmation.
+>
+> **On the range (`📏 Rng`):** these are the exchange-reported **bankruptcy prices** of the liquidated positions (Bybit `p`, OKX `bkPx`), not traded OHLC. Bankruptcy price sits just beyond where the market actually traded, so a short squeeze's range prints slightly *above* the real high and a long flush's slightly *below* the real low — it can look like "a price that never printed" even though it's the correct liquidation level.
 
 The independent SMA retest module sends its own message, with a distinct `📐` prefix so it stays readable in the same feed:
 
