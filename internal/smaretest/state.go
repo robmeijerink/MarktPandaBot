@@ -3,6 +3,7 @@ package smaretest
 import (
 	"fmt"
 	"log"
+	"time"
 )
 
 // Regime / state values.
@@ -29,11 +30,18 @@ type machine struct {
 	prevFast       float64
 	prevSlow       float64
 	barsSinceCross int
-	poleRing       []float64 // per-bar separation from the 21 SMA (trend dir, fraction) over the last PoleWindow bars
+	poleRing       []float64         // per-bar separation from the 21 SMA (trend dir, fraction) over the last PoleWindow bars
+	lastFire       map[int]time.Time // regime => bar time of the last alert sent in that direction (cooldown timer)
 }
 
 func newMachine(cfg Config, ind *indicators, send func(string)) *machine {
-	return &machine{cfg: cfg, ind: ind, send: send, outcomes: newOutcomeTracker(cfg.OutcomeHorizonsMin)}
+	return &machine{
+		cfg:      cfg,
+		ind:      ind,
+		send:     send,
+		outcomes: newOutcomeTracker(cfg.OutcomeHorizonsMin),
+		lastFire: make(map[int]time.Time),
+	}
 }
 
 // barCtx is the per-bar input to decide(): the indicator readings for this bar
@@ -194,18 +202,25 @@ func (m *machine) decide(c barCtx) {
 	// extra filter (RequireTightFlag, off by default so sharp micro-V kisses still fire).
 	poleOK := !m.cfg.RequirePole || separated
 	flagOK := !m.cfg.RequireTightFlag || c.flagTight
-	entryOK := poleOK && flagOK
+	// Cooldown: at most one alert per direction per CooldownMin minutes. Like the
+	// pole/flag gates, a cooled-down touch leaves the setup ARMED, so the setup can
+	// alert again on the next qualifying kiss once the window has passed rather than
+	// being consumed by an alert nobody received.
+	cooled := m.cooling(m.regime, c.bar.BucketStart)
+	entryOK := poleOK && flagOK && !cooled
 	fired := false
 	if armedAtStart {
 		if (longTouch || shortTouch) && entryOK {
 			if longTouch && m.cfg.longEnabled() {
 				m.send(buildTouch(m.cfg, regimeLong, c, m.barsSinceCross))
 				m.outcomes.record(c.bar.BucketStart, c.bar.Close, true, c.sepPct, c.flagRangePct, m.barsSinceCross)
+				m.lastFire[regimeLong] = c.bar.BucketStart
 				fired = true
 			}
 			if shortTouch && m.cfg.shortEnabled() {
 				m.send(buildTouch(m.cfg, regimeShort, c, m.barsSinceCross))
 				m.outcomes.record(c.bar.BucketStart, c.bar.Close, false, c.sepPct, c.flagRangePct, m.barsSinceCross)
+				m.lastFire[regimeShort] = c.bar.BucketStart
 				fired = true
 			}
 			m.reArmed = false
@@ -218,7 +233,7 @@ func (m *machine) decide(c barCtx) {
 	// alert went out, so a "it touched, why no alert?" is answerable from the journal
 	// without per-bar spam.
 	if (wickLong || wickShort) && !fired {
-		m.logSuppressedTouch(c, longTouch || shortTouch, poleOK, flagOK, armedAtStart)
+		m.logSuppressedTouch(c, longTouch || shortTouch, poleOK, flagOK, cooled, armedAtStart)
 	}
 
 	// (d) Re-arm gate for the NEXT bar (debounce): require a close that left the band.
@@ -232,6 +247,21 @@ func (m *machine) decide(c barCtx) {
 	}
 }
 
+// cooling reports whether an alert in this direction already went out less than
+// CooldownMin minutes before this bar. It is measured on BAR time, not the wall
+// clock, so the gate is deterministic and behaves identically in replay and tests.
+// A regime with no alert yet (zero value absent from the map) is never cooling.
+func (m *machine) cooling(regime int, barTime time.Time) bool {
+	if m.cfg.CooldownMin <= 0 {
+		return false
+	}
+	last, ok := m.lastFire[regime]
+	if !ok {
+		return false
+	}
+	return barTime.Sub(last) < time.Duration(m.cfg.CooldownMin)*time.Minute
+}
+
 // disarm sets state = IDLE; a new cross re-arms.
 func (m *machine) disarm() {
 	m.armed = false
@@ -242,7 +272,7 @@ func (m *machine) disarm() {
 // alert. It names the single dominant cause so the journal answers "it touched the
 // 21 — why no alert?" directly. closeOK is true when the close was already on the
 // correct side (i.e. the wick-out filter passed and the block was elsewhere).
-func (m *machine) logSuppressedTouch(c barCtx, closeOK, poleOK, flagOK, armedAtStart bool) {
+func (m *machine) logSuppressedTouch(c barCtx, closeOK, poleOK, flagOK, cooled, armedAtStart bool) {
 	var reason string
 	switch {
 	case !armedAtStart:
@@ -253,6 +283,9 @@ func (m *machine) logSuppressedTouch(c barCtx, closeOK, poleOK, flagOK, armedAtS
 		reason = fmt.Sprintf("no recent flagpole — price was not >= %.2f%% from the 21 within the last %d bars (peak %.2f%%); chop, not an impulse", m.cfg.MinSeparationPct, m.cfg.PoleWindow, c.sepPct)
 	case !flagOK:
 		reason = "pennant not tight/contracting yet (RequireTightFlag is on)"
+	case cooled:
+		reason = fmt.Sprintf("%s cooldown — a %s retest already alerted %.0fm ago (limit 1 per %dm per direction)",
+			regimeName(m.regime), regimeName(m.regime), c.bar.BucketStart.Sub(m.lastFire[m.regime]).Minutes(), m.cfg.CooldownMin)
 	default:
 		reason = "direction disabled for this regime"
 	}

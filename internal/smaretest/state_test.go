@@ -134,6 +134,7 @@ func TestReArmDebounce(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.ReArmMode = ReArmDebounce
+	cfg.CooldownMin = 0 // isolate the re-arm debounce from the per-direction cooldown
 	m, sent := testMachine(t, cfg)
 	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
 
@@ -161,6 +162,7 @@ func TestReArmDebounce(t *testing.T) {
 	// firstOnly: fires once then disarms for the regime.
 	cfgF := DefaultConfig()
 	cfgF.ReArmMode = ReArmFirstOnly
+	cfgF.CooldownMin = 0
 	mf, sentF := testMachine(t, cfgF)
 	mf.regime, mf.armed, mf.reArmed, mf.poleRing = regimeLong, true, true, []float64{1}
 	mf.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
@@ -322,6 +324,66 @@ func TestFlagpoleGate(t *testing.T) {
 	m2.decide(ctx(100, 90, 100, 90, band, touch))
 	if len(*sent2) != 1 {
 		t.Fatalf("with RequirePole=false the kiss should fire, got %d", len(*sent2))
+	}
+}
+
+// Test 9: per-direction cooldown — after a LONG alert, further LONG alerts are
+// silenced for CooldownMin minutes (the setup stays armed and fires again once the
+// window has passed), while the SHORT side keeps its own independent timer.
+func TestDirectionCooldown(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ReArmMode = ReArmDebounce
+	cfg.CooldownMin = 15
+	band := 0.05
+	t0 := msTime(1_700_000_000_000)
+
+	// A qualifying LONG kiss (low <= fast+band, close >= fast) stamped at bar time at.
+	longTouch := func(at time.Time) barCtx {
+		b := bar(100.02, 100.06, 99.97, 100.01)
+		b.BucketStart = at
+		return ctx(100, 90, 100, 90, band, b)
+	}
+	// A bar closing clear above the band, which re-arms the setup for the next bar.
+	reArm := func(at time.Time) barCtx {
+		b := bar(100.2, 100.3, 100.1, 100.2)
+		b.BucketStart = at
+		return ctx(100, 90, 100, 90, band, b)
+	}
+
+	m, sent := testMachine(t, cfg)
+	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
+
+	m.decide(longTouch(t0))
+	if len(*sent) != 1 {
+		t.Fatalf("first LONG touch should fire, alerts=%d", len(*sent))
+	}
+
+	// Re-armed and kissing again 6 minutes later: inside the cooldown => silent, and
+	// the setup must NOT be consumed by the alert that was never sent.
+	m.decide(reArm(t0.Add(5 * time.Minute)))
+	m.decide(longTouch(t0.Add(6 * time.Minute)))
+	if len(*sent) != 1 {
+		t.Fatalf("second LONG touch inside the cooldown must be silent, alerts=%d", len(*sent))
+	}
+	if !m.reArmed || !m.armed {
+		t.Fatalf("cooled-down touch must leave the setup armed: armed=%v reArmed=%v", m.armed, m.reArmed)
+	}
+
+	// 15 minutes after the alert the window has passed => the next kiss fires.
+	m.decide(longTouch(t0.Add(15 * time.Minute)))
+	if len(*sent) != 2 {
+		t.Fatalf("LONG touch after the cooldown should fire, alerts=%d", len(*sent))
+	}
+
+	// Independent timers: a LONG alert one minute ago does not silence a SHORT retest.
+	ms, sentS := testMachine(t, cfg)
+	ms.regime, ms.armed, ms.reArmed, ms.poleRing = regimeShort, true, true, []float64{1}
+	ms.lastFire[regimeLong] = t0
+	sb := bar(99.98, 100.03, 99.94, 99.99) // high >= fast-band, close <= fast
+	sb.BucketStart = t0.Add(time.Minute)
+	ms.decide(ctx(100, 110, 100, 110, band, sb))
+	if len(*sentS) != 1 {
+		t.Fatalf("SHORT touch must not be blocked by the LONG cooldown, alerts=%d", len(*sentS))
 	}
 }
 

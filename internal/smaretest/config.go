@@ -69,8 +69,13 @@ type Config struct {
 	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (only used when RequireTightFlag)
 
 	// Re-arm / anti-spam (TUNABLE).
-	ReArmMode        string // "debounce" (default) | "firstOnly"
-	EmitInvalidation bool   // false — send a note when price reaches the 200 SMA
+	ReArmMode string // "debounce" (default) | "firstOnly"
+	// CooldownMin silences a second retest alert in the SAME direction within this
+	// many minutes of the last one (0 = off). LONG and SHORT keep independent timers,
+	// so a regime flip can still alert immediately. It applies only to this module's
+	// alerts; no other notification is affected.
+	CooldownMin      int  // 15
+	EmitInvalidation bool // false — send a note when price reaches the 200 SMA
 
 	BarCloseGraceSec int // 3 — wait after candle close before reading the finalized kline (1m settles fast)
 
@@ -107,6 +112,7 @@ func DefaultConfig() Config {
 		FlagMaxRangePct:      0.3,
 		FlagContractionRatio: 0.8,
 		ReArmMode:            ReArmDebounce,
+		CooldownMin:          15,
 		EmitInvalidation:     false,
 		BarCloseGraceSec:     3,
 		OutcomeHorizonsMin:   []int{15, 30, 60},
