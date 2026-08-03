@@ -42,11 +42,13 @@ const (
 	// --- OI signal classification (NOT a filter) ---
 	// Every alert that clears the volume threshold is sent; the open-interest
 	// flow only labels it. A directional call (REVERSAL when OI falls,
-	// CONTINUATION when OI rises) requires |OI change| >= this over the window;
-	// anything smaller is labelled "Unclear". Kept deliberately strict so a
-	// reversal isn't called on a minor OI wobble — raise for stricter, lower for
-	// more eager labels.
-	MinOISignalFraction = 0.007 // 0.7% of combined OI over the 5-min window
+	// CONTINUATION when OI rises) requires |OI change| >= the bar for that
+	// direction over the window; anything smaller is labelled "Unclear". The
+	// bars are asymmetric: a reversal call is the stronger claim, so it needs a
+	// bigger swing than a continuation before it's made. Raise for stricter,
+	// lower for more eager labels.
+	MinOIContinuationFraction = 0.006 // +0.6% of combined OI => CONTINUATION
+	MinOIReversalFraction     = 0.010 // -1.0% of combined OI => REVERSAL
 	// A larger swing upgrades the label from "Potential" to "Likely". Real
 	// events seen: a 2.13% drop (capitulation) vs a 0.96% rise (continuation),
 	// so 1.5% cleanly separates a strong conviction call from a borderline one.
@@ -231,7 +233,8 @@ func dynamicThreshold(turnover24hUSD, lastPrice, high24h, low24h float64) (thres
 // dominant liquidation side. OI falling => positions flushed and not replaced
 // (capitulation / squeeze) => reversal; OI rising => fresh positions =>
 // continuation; OI roughly flat => unclear. The size of the swing sets the
-// confidence: "Potential" past MinOISignalFraction, "Likely" past
+// confidence: "Potential" past the directional bar (MinOIReversalFraction when
+// OI fell, MinOIContinuationFraction when it rose), "Likely" past
 // StrongOISignalFraction. dropFraction is positive when OI fell. This is a
 // LABEL, not a gate — every alert is sent regardless.
 func classifySignal(combinedOI, combinedOIDelta, longUSDT, shortUSDT float64) (label string, dropFraction float64) {
@@ -241,8 +244,13 @@ func classifySignal(combinedOI, combinedOIDelta, longUSDT, shortUSDT float64) (l
 	longsDominant := longUSDT >= shortUSDT
 	mag := math.Abs(dropFraction)
 
-	// Below the signal bar: not enough OI movement to call a direction.
-	if mag < MinOISignalFraction {
+	minSignal := MinOIContinuationFraction // OI rising
+	if dropFraction > 0 {                  // OI falling => reversal, stricter bar
+		minSignal = MinOIReversalFraction
+	}
+
+	// Below the signal bar for this direction: not enough OI movement to call it.
+	if mag < minSignal {
 		if longsDominant {
 			return "❓ Unclear — longs flushed, OI flat", dropFraction
 		}
@@ -272,8 +280,9 @@ func RunConfluenceEngine(aggregator *Aggregator, state *MarketState, token, chat
 	defer ticker.Stop()
 
 	log.Printf("[ENGINE] Confluence engine started. Evaluating every %s "+
-		"(dynamic threshold, floor %s; OI labels Potential at >= %.2f%%, Likely at >= %.2f%%)",
-		EvaluationInterval, humanUSD(ThresholdFloorUSDT), MinOISignalFraction*100, StrongOISignalFraction*100)
+		"(dynamic threshold, floor %s; OI labels Potential at >= +%.2f%% / -%.2f%%, Likely at >= %.2f%%)",
+		EvaluationInterval, humanUSD(ThresholdFloorUSDT), MinOIContinuationFraction*100,
+		MinOIReversalFraction*100, StrongOISignalFraction*100)
 
 	// OI baselines for the 5-minute delta, carried across cycles.
 	var prevOKXOI, prevBybitOI float64

@@ -75,6 +75,10 @@ func TestClassifySignal(t *testing.T) {
 		{"rise, shorts dominant", +60_000_000, 100000, 800000, "CONTINUATION UP"},
 		{"moderate drop below bar -> unclear", -30_000_000 /*-0.5%*/, 800000, 100000, "Unclear"},
 		{"flat OI -> unclear", +6_000 /*~0%*/, 800000, 100000, "Unclear"},
+		// The bars are asymmetric: the same 0.8% swing labels a continuation
+		// (bar +0.6%) but is too small to call a reversal (bar -1.0%).
+		{"0.8% drop below reversal bar -> unclear", -48_000_000, 800000, 100000, "Unclear"},
+		{"0.8% rise past continuation bar", +48_000_000, 800000, 100000, "CONTINUATION DOWN"},
 	}
 	for _, c := range cases {
 		label, _ := classifySignal(oi, c.oiDelta, c.longUSDT, c.shortUSDT)
@@ -87,7 +91,7 @@ func TestClassifySignal(t *testing.T) {
 func TestClassifySignal_ConfidenceTiers(t *testing.T) {
 	const oi = 6_000_000_000.0
 
-	// Moderate swing (1.0%, between 0.7% and 1.5%) -> "Potential", not "Likely".
+	// Moderate swing (1.0%, between the 1.0% reversal bar and 1.5%) -> "Potential", not "Likely".
 	moderate, _ := classifySignal(oi, -60_000_000, 800000, 100000)
 	if !strings.Contains(moderate, "Potential") || strings.Contains(moderate, "Likely") {
 		t.Errorf("moderate swing: want 'Potential', got %q", moderate)
@@ -126,7 +130,7 @@ func TestComputeStats_LongFlush(t *testing.T) {
 	if okx.biggestSide != "long" || bybit.biggestSide != "long" {
 		t.Errorf("biggest sides must be long, got okx=%q bybit=%q", okx.biggestSide, bybit.biggestSide)
 	}
-	// -60M on $6B OI = -1.0%, past the 0.7% bar -> a real reversal.
+	// -60M on $6B OI = -1.0%, at the 1.0% reversal bar -> a real reversal.
 	label, _ := classifySignal(6e9, -60e6, okx.longUSDT+bybit.longUSDT, okx.shortUSDT+bybit.shortUSDT)
 	if !strings.Contains(label, "REVERSAL UP") {
 		t.Errorf("expected REVERSAL UP, got %q", label)

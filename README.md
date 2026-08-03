@@ -165,7 +165,7 @@ This generates the static `marktpanda_bot` executable, which can be deployed dir
 
 All tunable behavior lives in one place per feature — no engine restructuring needed to adjust it:
 
-- **Liquidation alert thresholds** — tunable constants at the top of `internal/aggregator/engine.go`: the dynamic per-venue volume bar (floor, volume-baseline fraction, volatility multiplier cap) and the OI-flow label bands (`MinOISignalFraction`, `StrongOISignalFraction`) that decide reversal / continuation / unclear.
+- **Liquidation alert thresholds** — tunable constants at the top of `internal/aggregator/engine.go`: the dynamic per-venue volume bar (floor, volume-baseline fraction, volatility multiplier cap) and the OI-flow label bands (`MinOIContinuationFraction`, `MinOIReversalFraction`, `StrongOISignalFraction`) that decide reversal / continuation / unclear.
 - **SMA Retest module** (`internal/smaretest` config block): timeframe (`1m` by default) and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole gate (`RequirePole`, `MinSeparationPct`, `PoleWindow`) and the flag gate (`RequireTightFlag` on by default, `FlagLookback`, `FlagMaxRangePct`, `FlagContractionRatio`), direction filter (both/long/short), the re-arm/anti-spam mode (`ReArmMode`; default is debounce for multiple retests per cross) and the per-direction alert cooldown (`CooldownMin`; 15 minutes, `0` disables), the forward-return horizons for outcome logging (`OutcomeHorizonsMin`), and warm-boot depth.
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and validate against real events before trading on them.
