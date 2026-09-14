@@ -78,11 +78,53 @@ On ~20 days of Bybit BTCUSDT 1m candles, the shipped defaults fire roughly once 
 
 > ⚠️ **1m is fast and noisy, and this is plumbing for a setup signal — not a validated edge.** Expect many alerts, more whipsaw, and transaction costs that bite a larger fraction of each move than on higher timeframes; runaway trends that never retest the 21 SMA are missed by design. The shipped 1m thresholds are volatility-scaled starting points — use the outcome logs to validate and re-tune the long and short legs separately before acting on them. Every threshold lives in the module's config block.
 
+## 🧹 Liquidity Sweep Alerts (Independent Module)
+
+A third, fully self-contained module (`internal/sweep`) watches **closed 5-minute BTCUSDT candles** for a textbook **liquidity sweep**: price runs the stops beyond an obvious level, then snaps back. It has its own Bybit and OKX streams, state and messages, and shares nothing with the other alerts.
+
+**What has to happen — all of it, on one candle:**
+
+| Rule | Default | Why |
+|---|---|---|
+| **A liquidity level is taken out** — a 1h swing high/low (2 hours either side didn't go beyond it), the previous UTC day's high/low, or the previous week's. Equal highs/lows (within `EqualLevelTolPct`) merge into one level. | levels up to 7 days old | That's where stops and liquidation prices rest. |
+| The wick clears the level by **enough, but not too much** | 0.05 – 1.5 × ATR | A one-tick poke isn't a stop run; running far beyond is a breakdown that happened to bounce. |
+| The candle **closes back inside** the level | — | Closing beyond it is a break, not a sweep. |
+| A **big rejection wick** | ≥ 50% of the candle and ≥ 1 × ATR(14) | The rejection has to be visible, not a body-heavy candle. |
+| **Heavy volume** | ≥ 2.5 × the median of the last 4h | Stops being hit create a volume burst. |
+| **Liquidations on the swept side** — longs for a swept low, shorts for a swept high — Bybit + OKX, inside that candle | ≥ $250k and ≥ 70% one-sided | Proof that leveraged positions were actually flushed. The Bybit feed must have been connected for the whole candle. |
+| **Cooldown** | 1 alert per direction per 60 min | |
+
+Each level can alert only once: any candle that trades through it spends it, sweep or not. On startup the module replays ~8 days of candles silently to rebuild the levels (history has no liquidation data, so it can never alert on the past), and it backfills candles missed during a reconnect the same way.
+
+**Be clear about what it is.** Before building it, the rules were backtested on 90 days of BTC data (Bybit candles, Bybit open interest, and Binance BTCUSDT futures taker buy/sell volume), tuned on 60 days and checked on the last 30. **No candle-based version beat chance**: textbook sweeps of swing, 1h, daily and weekly levels, with any wick size, volume spike, open-interest drop, taker-flow absorption or structure-shift confirmation, reached +2R before the wick was taken out about 30–35% of the time — the same as a random candle with the same stop. Historical liquidation data isn't available anywhere for free, so the liquidation rule — the one ingredient that makes a sweep a sweep — could not be tested. That's why the alert says *"a sweep, not a guaranteed reversal"*, and why every alert is measured:
+
+**Outcome logging.** Each alert logs `[SWEEP-OUTCOME-T0]` (entry, invalidation, risk and every feature), `[SWEEP-OUTCOME-STOP]` if price later trades beyond the wick (the sweep failed), and `[SWEEP-OUTCOME-FWD]` at 15/30/60/240 minutes (return from entry, best R reached, stopped or not). After a few weeks, grep these to see whether liquidation-confirmed sweeps actually beat 35% at 2R — then keep, tighten or remove the module. Every candle that took out a level but failed a rule is logged too (`[SWEEP] … rejected: <reason>`).
+
+**Tweak or remove it.** Every rule is a field in `sweep.Config` (`internal/sweep/config.go`). `LogOnly: true` keeps it running and logging without sending anything; `RequireLiquidations: false` alerts on the candle rules alone. To remove it completely, delete the single `sweep.Run(...)` call in `main.go` and the `internal/sweep` folder.
+
+```markdown
+🧹 LIQUIDITY SWEEP 🟢 BULLISH
+
+🎯 Swept previous day low $63,520
+      + 1h swing low $63,480 (tested 2×, formed 9h ago)
+💲 BTC $63,704 · 5m candle closed back above
+
+🕯 Wick to $63,410 · 2.1× ATR · 68% of the candle
+📊 Volume 3.4× the 4h median
+💥 $1.2M longs liquidated (Bybit $934k · OKX $300k)
+
+🛑 Invalidated below $63,410
+ℹ️ Stops were run and the level reclaimed — a sweep, not a guaranteed reversal.
+```
+
+> Bearish sweeps mirror this (🔴, swept highs, shorts liquidated, invalidated above). Level names, prices and the liquidation split are bold in Telegram. The values above are illustrative.
+
 ## ✨ Key Features
 
 - **Zero Alert Fatigue:** 5-minute rolling windows and configurable volume confluence filters ensure you only get notified during major volatility blocks.
 - **Directional Context Label:** Each alert is labelled from combined Open Interest flow — *reversal up* (capitulation), *continuation*, or *unclear* — as plain context on the raw event, not a scored buy/sell signal.
 - **21/200 SMA Retest Module:** A fully independent add-on that watches 1-minute candles for bar-close retests of the 21 SMA after a 21/200 cross (both long and short), with a 200-SMA invalidation guard, anti-spam debounce, per-signal forward-return outcome logging, and a WebSocket-primary / REST-fallback candle feed.
+- **Liquidity Sweep Module:** A fully independent add-on that alerts on strict 5-minute stop runs through 1h swing, previous-day and previous-week levels — big rejection wick, heavy volume and live Bybit + OKX liquidations on the swept side — with per-alert outcome logging and a log-only switch.
 - **Stateful Context Engine:** Doesn't just report the crash; it reports the context. Real-time Open Interest shifts ($\Delta$) and Funding Rates are attached to every alert to help identify Short Squeezes, long-squeezes, and trap setups.
 - **Smartwatch Optimized:** Alerts are meticulously formatted using minimalist layouts, specific bold markers, and clean line breaks, allowing you to read Volume, Range, Funding, and OI delta at a single glance on your wrist.
 - **DevOps Ready:** Compiled as a 100% statically linked Linux binary (`CGO_ENABLED=0`). Extremely lightweight footprint (~30MB RAM), perfect for hosting on cloud resources or micro-instances like a worker node.
@@ -182,5 +224,6 @@ All tunable behavior lives in one place per feature — no engine restructuring 
 
 - **Liquidation alert thresholds** — tunable constants at the top of `internal/aggregator/engine.go`: the dynamic per-venue volume bar (floor, volume-baseline fraction, volatility multiplier cap) and the OI-flow label bands (`MinOIContinuationFraction`, `MinOIReversalFraction`, `StrongOISignalFraction`) that decide reversal / continuation / unclear.
 - **SMA Retest module** (`internal/smaretest` config block): timeframe (`1m` by default) and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole (`MinPoleMovePct`, `MaxPoleBars`, `MinPoleExtPct`), the flag (`MinFlagBars`, `MaxFlagBars`, `MaxFlagRetrace`, `MaxFlagSpeedRatio`, `MinSMACatchUp`), the 21 SMA slope (`SlopeBars`, `MinSlopePct`), direction filter (both/long/short), setups per cross (`MaxSetupsPerCross`; 1 by default, `0` unlimited) and the per-direction alert cooldown (`CooldownMin`; 15 minutes, `0` disables), the forward-return horizons for outcome logging (`OutcomeHorizonsMin`), and warm-boot depth.
+- **Liquidity Sweep module** (`internal/sweep` config block): level sources and merging (`SwingStrength`, `EqualLevelTolPct`, `MaxLevelAgeHours`), the sweep candle (`MinPenetrationATR`, `MaxPenetrationATR`, `MinWickRatio`, `MinWickATR`, `MinVolumeRatio`, `VolumeLookback`), the liquidation confirmation (`RequireLiquidations`, `MinLiqUSD`, `MinLiqSideShare`, `LiqGraceSec`), `CooldownMin`, `LogOnly`, and the outcome horizons (`OutcomeHorizonsMin`).
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and validate against real events before trading on them.

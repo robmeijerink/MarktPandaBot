@@ -9,6 +9,7 @@ import (
 	"github.com/robmeijerink/MarktPandaBot/internal/bybit"
 	"github.com/robmeijerink/MarktPandaBot/internal/okx"
 	"github.com/robmeijerink/MarktPandaBot/internal/smaretest"
+	"github.com/robmeijerink/MarktPandaBot/internal/sweep"
 	"github.com/robmeijerink/MarktPandaBot/internal/telegram"
 )
 
@@ -52,6 +53,13 @@ func main() {
 	// own 1m klines (WS primary, REST fallback), sending its own Telegram messages.
 	// It shares no state with the engine above.
 	go smaretest.Run(smaretest.DefaultConfig(), func(msg string) {
+		telegram.DispatchTelegramAlert(telegramToken, chatID, msg)
+	})
+
+	// Liquidity sweep module (internal/sweep) — fully independent add-on with its own
+	// Bybit/OKX streams and messages. Remove it by deleting this call; mute it without
+	// removing by setting LogOnly in its Config; tune every rule in that same Config.
+	go sweep.Run(sweep.DefaultConfig(), func(msg string) {
 		telegram.DispatchTelegramAlert(telegramToken, chatID, msg)
 	})
 
