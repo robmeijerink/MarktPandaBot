@@ -21,7 +21,7 @@ func TestOutcomeTrackerForward(t *testing.T) {
 	o, lines := captureTracker(15, 30)
 	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
-	o.record(t0, 100, true, 0.5, 0.2, 7)
+	o.record(t0, 100, true, setupStats{poleMovePct: 0.5, retracePct: 40}, 7)
 	if len(*lines) != 1 || !strings.HasPrefix((*lines)[0], "[SMARETEST-OUTCOME-T0]") {
 		t.Fatalf("record should emit exactly one T0 line, got %v", *lines)
 	}
@@ -57,7 +57,7 @@ func TestOutcomeTrackerForward(t *testing.T) {
 func TestOutcomeTrackerShortAndGap(t *testing.T) {
 	o, lines := captureTracker(15, 30)
 	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	o.record(t0, 100, false, 0.4, 0.15, 3) // short entry
+	o.record(t0, 100, false, setupStats{poleMovePct: 0.4, retracePct: 50}, 3) // short entry
 
 	// One bar well past both horizons resolves both on the same bar (price down =>
 	// favorable for a short).
@@ -81,7 +81,7 @@ func TestOutcomeTrackerShortAndGap(t *testing.T) {
 func TestOutcomeTrackerDisabled(t *testing.T) {
 	o, lines := captureTracker() // no horizons
 	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	o.record(t0, 100, true, 0.5, 0.2, 7)
+	o.record(t0, 100, true, setupStats{poleMovePct: 0.5, retracePct: 40}, 7)
 	o.onBar(Bar{BucketStart: t0.Add(60 * time.Minute), Close: 110})
 	if len(*lines) != 1 {
 		t.Fatalf("disabled horizons should emit only the T0 line, got %v", *lines)

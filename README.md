@@ -46,19 +46,33 @@ The alert also carries a **directional label** derived from combined Open Intere
 
 A separate, fully self-contained module watches for **pullback / retest entries** on the **1-minute timeframe** (the timeframe the CryptoLifer / Sam Price model is actually taught on). It is completely decoupled from the liquidation engine above — it keeps its own state, streams its own candles, and sends its own messages. It shares no data with the liquidation engine and cannot affect the base liquidation alerts.
 
-The idea is mechanical, not pattern-matching, and follows the CryptoLifer / Sam Price "model": a 21/200 SMA cross sets the trend, a sudden **flagpole** overextends price away from the 21 SMA, and the module then takes the **pullback that kisses the 21 SMA** (dynamic support for longs, resistance for shorts) as the entry confirmation. A pullback all the way to the **200 SMA** invalidates the setup.
+It follows the CryptoLifer / Sam Price "model" and detects it as an **ordered sequence** on closed candles — each phase has to happen after the previous one, or nothing fires:
+
+**21/200 cross → flagpole → flag → first touch of the 21 SMA**
+
+A pullback all the way to the **200 SMA** invalidates the setup.
 
 **How it works:**
 
-1. **Trend (regime).** A golden cross (21 SMA above 200 SMA) arms **long** retest setups; a death cross arms **short** setups. Both directions are watched. There is no alert on the cross itself — only on the subsequent confirmed entry.
-2. **Flagpole gate.** A kiss only counts as an entry when a **recent, aggressive flagpole** preceded it: price must have overextended ≥ `MinSeparationPct` away from the 21 SMA (in the trend direction) with that peak falling inside the last `PoleWindow` bars. The recency window is what encodes "aggressive" — covering that gap within a short window is an impulse, whereas a slow drift never reaches the depth in time. The kiss bar itself is excluded, so the pole is always a *prior* move and the touch proves the return. Without this gate, price sitting on the 21 SMA would fire on every local mean reversion. Disable with `RequirePole=false`.
-3. **Bar-close kiss.** A long entry fires only when the candle's low reaches the 21 SMA (within a small tolerance band) **and the candle closes back at or above it** — a wick that pierces the SMA but closes below is rejected (the setup is invalidated). Shorts mirror this. This close-on-the-right-side filter is the whole point of evaluating on closed bars.
-4. **Flag gate.** After the pole, the alert waits for a real **flag** to form before the kiss: a tight, contracting range in the bars just before the touch (recent range within `FlagMaxRangePct` of price and tighter than the earlier half by `FlagContractionRatio`, over `FlagLookback` bars). This is what stops it firing on the *first* poke at the 21 — a sharp micro-V straight back to the line, with no consolidation, is held until price settles into a flag. It's **on by default** (`RequireTightFlag=true`); turn it off to also take those immediate V-shape kisses (more, earlier alerts).
-5. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
-6. **Anti-spam.** By default, when a kiss fires, the setup stays armed until price closes back outside the tolerance band (debounce mode) — allowing multiple alerts per cross, one for each clean retest of the same flagpole. This matches the model where each pullback to the 21 in a live trend is a separate entry opportunity. On top of that, a **per-direction cooldown** caps the rate at one alert per direction per `CooldownMin` minutes (15 by default): a qualifying kiss inside the window is logged but not sent, and because it is *not* consumed the setup keeps waiting and alerts on the next kiss once the window passes. LONG and SHORT have independent timers, so a regime flip can alert immediately. This cooldown applies to the SMA retest alert only — no other notification is affected.
-7. **Warm boot.** On startup the module silently hydrates ~400 closed 1m candles from REST and establishes the current regime **without firing a historical alert**; the first qualifying live bar can still trigger.
+1. **Cross (regime).** A golden cross (21 SMA above 200 SMA) starts the search for a **long** setup; a death cross for a **short** one. Both directions are watched. There is no alert on the cross itself. A trend whose cross the module has not seen (e.g. older than the warm-boot history) is not traded.
+2. **Flagpole.** After the cross, price must launch an impulsive leg in the trend direction: from its origin (the lowest low in the window, for a long) to a new extreme ≥ `MinPoleMovePct`, covered within `MaxPoleBars` bars — a slow drift never gets there in time. At the extreme, price must also stand ≥ `MinPoleExtPct` away from the 21 SMA: that gap is what the flag later closes. Price riding on the 21 never makes a pole, so it never alerts.
+3. **Flag.** After the pole's extreme, price pulls back while the 21 SMA catches up. A new extreme extends the pole and restarts the flag. The flag breaks — and the pole is discarded — if it gives back more than `MaxFlagRetrace` of the pole, closes through the 21 SMA, or hasn't reached the 21 within `MaxFlagBars` bars.
+4. **Touch (entry).** The first bar that reaches the 21 SMA (within a small tolerance band) **and closes back on the trend side** completes the flag. It alerts only if the flag is real and the trend is still intact:
+   - the flag lasted ≥ `MinFlagBars` bars (a quicker touch is a snap back, not a flag);
+   - the **21 SMA caught up to price** — it closed ≥ `MinSMACatchUp` of the gap that stood between it and the pole's extreme. This is what separates a flag (price goes sideways, the 21 comes to it) from a V (price falls straight back onto the 21);
+   - the pullback ran no faster than `MaxFlagSpeedRatio` × the pole's speed;
+   - the **21 SMA is still curving in the trend direction** — up for a long, down for a short — by ≥ `MinSlopePct` over `SlopeBars` bars.
 
-**Outcome logging (measurement).** None of the gates above are a validated edge — so for every retest it fires, the module logs a `[SMARETEST-OUTCOME-T0]` line (entry price, separation, range tightness, bars since cross) and, at each configured horizon (15/30/60 min by default), a `[SMARETEST-OUTCOME-FWD]` line with the realised forward return and whether it moved in the trade's favour. The forward prices come from the module's own live candle stream (no extra REST calls), and both lines share an `id=<entry time>` join key. Grep the logs to compute the signal's real hit-rate from data instead of impression, and re-tune the thresholds from there.
+   Either way that first touch consumes the pole: another alert needs a fresh pole and flag.
+5. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
+6. **Anti-spam.** By default only the **first setup after each cross** alerts (`MaxSetupsPerCross=1`; `0` allows every fresh pole + flag in the trend). On top of that, a **per-direction cooldown** caps the rate at one alert per direction per `CooldownMin` minutes (15 by default). LONG and SHORT have independent timers, so a regime flip can alert immediately. This cooldown applies to the SMA retest alert only — no other notification is affected.
+7. **Warm boot.** On startup the module fetches ~1000 closed 1m candles from REST and **replays them silently** through the same state machine. The regime, a flag still forming, and setups that already alerted are rebuilt exactly, so a restart neither misses a forming flag nor re-alerts an old one.
+
+The journal (`[SMARETEST]` lines) records every flagpole the module finds and why each flag was dropped (snap back, V onto the 21, flat 21, closed through, stale, cooldown), so "it touched the 21 — why no alert?" can be answered from the logs.
+
+On ~20 days of Bybit BTCUSDT 1m candles, the shipped defaults fire roughly once or twice a day, on setups that visually match the model; the previous gates fired ~6×/day, mostly on chop and V-bounces.
+
+**Outcome logging (measurement).** None of the rules above are a validated edge — so for every retest it fires, the module logs a `[SMARETEST-OUTCOME-T0]` line (entry price, pole size and speed, flag length, retrace, how much of the gap the 21 closed, 21 SMA slope, bars since cross) and, at each configured horizon (15/30/60 min by default), a `[SMARETEST-OUTCOME-FWD]` line with the realised forward return and whether it moved in the trade's favour. The forward prices come from the module's own live candle stream (no extra REST calls), and both lines share an `id=<entry time>` join key. Grep the logs to compute the signal's real hit-rate from data instead of impression, and re-tune the thresholds from there.
 
 **Data source.** The 1m candles come from the primary exchange (Bybit perp BTC/USDT by default) over a WebSocket kline subscription, with a REST poll as an automatic fallback if the socket goes quiet — so a dropped connection or a geo-blocked REST host (it transparently fails over to Bybit's `bytick.com` mirror) does not silence the feed.
 
@@ -109,15 +123,16 @@ The independent SMA retest module sends its own message, with a distinct `📐` 
 📐 SMA RETEST — LONG (1m)
 BTC/USDT  @ 63704.40
 21 SMA: 63702.10   |   200 SMA: 63180.50
-Touch low: 63689.20   (stop reference, not advice)
+Touch low: 63689.20
 Room to 200 SMA: 0.82%
-Flagpole: 0.95% overextension (within last 20 bars)
-Flag: 0.31% tight range over 12 bars
-Regime: 14 bars since golden cross
-Flagpole + flag + kiss of the 21 SMA (support held) — model entry.
+Flagpole: 0.95% in 8 bars (0.41% above the 21)
+Flag: 9 bars, gave back 38% of the pole; the 21 closed 52% of the gap
+21 SMA rising: 0.085% over 5 bars
+Regime: 34 bars since golden cross
+Cross + flagpole + flag + kiss of the rising 21 SMA (support held) — model entry.
 ```
 
-> Short setups mirror this (death cross, `Touch high`, "resistance held"). The "flagpole" metric shows how far price overextended from the 21 SMA within the recency window; the "flag" line shows the tight, contracting range the pullback formed before the kiss. The values above are illustrative.
+> Short setups mirror this (death cross, `Touch high`, a falling 21, "resistance held"). The values above are illustrative.
 
 ## 🚀 Setup & Configuration
 
@@ -166,6 +181,6 @@ This generates the static `marktpanda_bot` executable, which can be deployed dir
 All tunable behavior lives in one place per feature — no engine restructuring needed to adjust it:
 
 - **Liquidation alert thresholds** — tunable constants at the top of `internal/aggregator/engine.go`: the dynamic per-venue volume bar (floor, volume-baseline fraction, volatility multiplier cap) and the OI-flow label bands (`MinOIContinuationFraction`, `MinOIReversalFraction`, `StrongOISignalFraction`) that decide reversal / continuation / unclear.
-- **SMA Retest module** (`internal/smaretest` config block): timeframe (`1m` by default) and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole gate (`RequirePole`, `MinSeparationPct`, `PoleWindow`) and the flag gate (`RequireTightFlag` on by default, `FlagLookback`, `FlagMaxRangePct`, `FlagContractionRatio`), direction filter (both/long/short), the re-arm/anti-spam mode (`ReArmMode`; default is debounce for multiple retests per cross) and the per-direction alert cooldown (`CooldownMin`; 15 minutes, `0` disables), the forward-return horizons for outcome logging (`OutcomeHorizonsMin`), and warm-boot depth.
+- **SMA Retest module** (`internal/smaretest` config block): timeframe (`1m` by default) and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole (`MinPoleMovePct`, `MaxPoleBars`, `MinPoleExtPct`), the flag (`MinFlagBars`, `MaxFlagBars`, `MaxFlagRetrace`, `MaxFlagSpeedRatio`, `MinSMACatchUp`), the 21 SMA slope (`SlopeBars`, `MinSlopePct`), direction filter (both/long/short), setups per cross (`MaxSetupsPerCross`; 1 by default, `0` unlimited) and the per-direction alert cooldown (`CooldownMin`; 15 minutes, `0` disables), the forward-return horizons for outcome logging (`OutcomeHorizonsMin`), and warm-boot depth.
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and validate against real events before trading on them.

@@ -16,22 +16,71 @@ const (
 // machine runs the retest state machine. A single goroutine feeds finalized bars
 // to processBar, so state transitions are naturally serialized; the indicator ring
 // is independently mutex-guarded (§concurrency). The pure decision logic lives in
-// decide() so it can be unit-tested without building 200-bar SMA series.
+// decide() so it can be unit-tested with scripted SMA readings instead of 200-bar
+// series.
+//
+// The model is detected as an ordered sequence on closed bars:
+//
+//	21/200 cross → flagpole → flag → first touch of the 21 SMA
+//
+// Only a touch that completes that sequence alerts. A pole is consumed by the first
+// touch of the 21 after it (alert or not) and by a failed flag, so every alert needs
+// its own pole and flag; price chopping around the 21 never alerts on its own.
 type machine struct {
 	cfg      Config
 	ind      *indicators
 	send     func(string)
 	outcomes *outcomeTracker // labels fired retests and logs their forward returns
+	silent   bool            // warm-boot replay: evolve state from history but send and log nothing
 
-	regime         int     // regimeNone until a cross or warm boot sets it
-	armed          bool    // true == ARMED, false == IDLE
-	reArmed        bool    // first touch after a cross/re-arm may fire
-	havePrev       bool    // a previous bar's SMAs are known (for cross detection)
+	regime         int  // regimeNone until the first observed cross
+	armed          bool // a cross was observed and the setup is not invalidated or used up
+	havePrev       bool // a previous bar's SMAs are known (for cross detection)
 	prevFast       float64
 	prevSlow       float64
 	barsSinceCross int
-	poleRing       []float64         // per-bar separation from the 21 SMA (trend dir, fraction) over the last PoleWindow bars
-	lastFire       map[int]time.Time // regime => bar time of the last alert sent in that direction (cooldown timer)
+	setupsFired    int // alerts sent since the last cross (MaxSetupsPerCross)
+
+	leg      []Bar             // the last MaxPoleBars bars since the last reset: where a pole's origin is searched
+	fastHist []float64         // the last SlopeBars+1 fast SMA readings, for the slope rule
+	pole     *pole             // the qualified flagpole whose flag is forming; nil while seeking one
+	lastFire map[int]time.Time // regime => bar time of the last alert sent in that direction (cooldown timer)
+}
+
+// pole is a qualified flagpole and the flag forming after it. Prices are read in the
+// trend direction: for a long the origin is the leg's lowest low, the extreme its
+// highest high and the flag depth the lowest low since the extreme; a short mirrors
+// all three.
+type pole struct {
+	origin    float64
+	extreme   float64
+	bars      int     // bars from the origin to the extreme
+	extFast   float64 // the 21 SMA on the extreme's bar
+	extPct    float64 // distance of the extreme from the 21 SMA, %
+	flagBars  int     // bars since the extreme
+	flagDepth float64
+}
+
+// setupStats summarises a completed pole → flag → touch for the alert and outcome log.
+type setupStats struct {
+	poleMovePct float64 // pole size, % of the origin price
+	poleBars    int     // bars from the pole's origin to its extreme
+	poleExtPct  float64 // distance from the 21 SMA at the pole's extreme, %
+	flagBars    int     // bars from the extreme to the touch (inclusive)
+	retracePct  float64 // share of the pole the flag gave back, %
+	catchUpPct  float64 // share of the extreme's gap to the 21 SMA closed by the 21 moving, %
+	slopePct    float64 // 21 SMA move over SlopeBars into the touch, % (positive = trend direction)
+}
+
+// catchUp is the share of the gap between the pole's extreme and the 21 SMA (as it
+// stood on the extreme's bar) that the 21 itself has closed by now. Near 1 the 21
+// came to price (a sideways flag); near 0 price came to the 21 (a V).
+func catchUp(p *pole, fast, dir float64) float64 {
+	gap := (p.extreme - p.extFast) * dir
+	if gap <= 0 {
+		return 0
+	}
+	return (fast - p.extFast) * dir / gap
 }
 
 func newMachine(cfg Config, ind *indicators, send func(string)) *machine {
@@ -53,9 +102,6 @@ type barCtx struct {
 	havePrev           bool
 	band               float64
 	bar                Bar
-	flagTight          bool    // the preceding consolidation is a tight, contracting range
-	flagRangePct       float64 // recent-half range height as % of price (for the message)
-	sepPct             float64 // flagpole depth: peak overextension from the 21 SMA within the recency window, as % (set in decide, for the message)
 }
 
 // processBar is the live entry point: push the bar, recompute indicators, and run
@@ -77,70 +123,27 @@ func (m *machine) processBar(b Bar) {
 			band = m.cfg.ATRMult * atr
 		}
 	}
-	// Measure the consolidation that precedes this (touch-candidate) bar so the
-	// decision can require a tight, contracting range — the model's entry premise.
-	fw := m.ind.flag(m.cfg.FlagLookback)
-	flagRangePct := 0.0
-	if fw.ok && fw.refPrice > 0 {
-		flagRangePct = fw.recentRange / fw.refPrice * 100
-	}
 	m.decide(barCtx{
-		fast:         fast,
-		slow:         slow,
-		prevFast:     m.prevFast,
-		prevSlow:     m.prevSlow,
-		havePrev:     m.havePrev,
-		band:         band,
-		bar:          b,
-		flagTight:    tightFlag(m.cfg, fw),
-		flagRangePct: flagRangePct,
+		fast:     fast,
+		slow:     slow,
+		prevFast: m.prevFast,
+		prevSlow: m.prevSlow,
+		havePrev: m.havePrev,
+		band:     band,
+		bar:      b,
 	})
 	// Remember this bar's SMAs so the next bar can detect a sign flip.
 	m.prevFast, m.prevSlow, m.havePrev = fast, slow, true
 }
 
-// pushPole records this bar's separation of price from the 21 SMA (trend direction:
-// long => high above the 21; short => low below it) into the rolling pole ring, then
-// trims the ring to the last PoleWindow bars. Wrong-side excursions clamp to 0.
-func (m *machine) pushPole(fast float64, b Bar) {
-	if fast <= 0 || m.regime == regimeNone {
-		return
-	}
-	var sep float64
-	if m.regime == regimeLong {
-		sep = (b.High - fast) / fast
-	} else {
-		sep = (fast - b.Low) / fast
-	}
-	if sep < 0 {
-		sep = 0
-	}
-	m.poleRing = append(m.poleRing, sep)
-	if w := m.cfg.PoleWindow; w > 0 && len(m.poleRing) > w {
-		m.poleRing = m.poleRing[len(m.poleRing)-w:]
-	}
-}
-
-// poleDepth is the deepest overextension from the 21 SMA still inside the recency
-// window — the height of the most recent flagpole. Because the ring is trimmed to
-// PoleWindow, a pole that has scrolled out of the window no longer counts.
-func (m *machine) poleDepth() float64 {
-	mx := 0.0
-	for _, s := range m.poleRing {
-		if s > mx {
-			mx = s
-		}
-	}
-	return mx
-}
-
-// decide implements the §4 state machine for a single finalized bar. It mutates
-// regime/armed/reArmed and calls send() for touches (and optional invalidations).
+// decide implements the state machine for a single finalized bar. It mutates the
+// regime and pole/flag state and calls send() for model entries (and optional
+// invalidations).
 func (m *machine) decide(c barCtx) {
 	m.barsSinceCross++ // one more bar has elapsed since the last cross
 
 	// (a) Cross detection (bar-close): a sign flip of (SMA21 - SMA200) sets the
-	// regime and (re)arms. No separate "cross" alert (L4) — only touches alert.
+	// regime and arms a fresh search for the model. There is no alert on the cross.
 	if c.havePrev && sign2(c.prevFast-c.prevSlow) != sign2(c.fast-c.slow) {
 		if c.fast-c.slow > 0 {
 			m.regime = regimeLong
@@ -148,102 +151,190 @@ func (m *machine) decide(c barCtx) {
 			m.regime = regimeShort
 		}
 		m.armed = true
-		m.reArmed = true
 		m.barsSinceCross = 0
-		m.poleRing = m.poleRing[:0] // the pole is measured from this new trend, not the last one
+		m.setupsFired = 0
+		// A pole belongs to one trend. The leg window is kept: the rally that caused
+		// the cross may be where the new pole starts.
+		m.pole = nil
 	}
+	m.pushFast(c.fast)
+	defer m.pushLeg(c.bar) // this bar joins the pole-origin window only after it has been evaluated
 
-	if !m.armed {
+	if !m.armed || !m.enabled(m.regime) {
 		return
 	}
-
-	// Flagpole: read the deepest overextension from the 21 SMA still inside the recency
-	// window as of BEFORE this bar, then fold this bar in for future bars. Reading the
-	// pre-update value means the kiss bar's own small excursion past the 21 can never,
-	// by itself, stand in for the pole — the pole is always a PRIOR move and this touch
-	// proves the return. poleSep (as %) is carried on c for the message.
-	poleSep := m.poleDepth()
-	m.pushPole(c.fast, c.bar)
-	separated := poleSep*100 >= m.cfg.MinSeparationPct
-	c.sepPct = poleSep * 100
 
 	// (b) Invalidation: a pullback that reaches the 200 SMA disarms the regime.
-	if m.regime == regimeLong && c.bar.Low <= c.slow {
-		m.disarm()
-		if m.cfg.EmitInvalidation {
-			m.send(buildInvalidation(m.cfg, regimeLong, c))
+	if (m.regime == regimeLong && c.bar.Low <= c.slow) || (m.regime == regimeShort && c.bar.High >= c.slow) {
+		m.logf("[SMARETEST] %s %s invalidated: price reached the 200 SMA (%.2f); waiting for the next cross",
+			c.bar.BucketStart.Format("15:04"), regimeName(m.regime), c.slow)
+		if m.cfg.EmitInvalidation && !m.silent {
+			m.send(buildInvalidation(m.cfg, m.regime, c))
 		}
-		return
-	}
-	if m.regime == regimeShort && c.bar.High >= c.slow {
 		m.disarm()
-		if m.cfg.EmitInvalidation {
-			m.send(buildInvalidation(m.cfg, regimeShort, c))
-		}
 		return
 	}
 
-	// (c) Touch detection — evaluated against the arm state AS OF BAR START, so a
-	// single bar can never both re-arm and fire. The wick-out filter requires the
-	// close back on the correct side of the 21 SMA, not just a wick through it. The
-	// touch only counts as an entry when a recent flagpole preceded it (the model's
-	// premise); a geometric touch that fails the gate leaves the setup ARMED so it
-	// keeps waiting for the real entry instead of being consumed.
-	armedAtStart := m.reArmed
-	// A "wick touch" is the candle reaching the 21 SMA band; a full touch additionally
-	// requires the close back on the correct side (the wick-out filter). Splitting them
-	// lets us trace a touch that was seen on the chart but rejected on the close.
-	wickLong := m.regime == regimeLong && c.bar.Low <= c.fast+c.band
-	wickShort := m.regime == regimeShort && c.bar.High >= c.fast-c.band
-	longTouch := wickLong && c.bar.Close >= c.fast
-	shortTouch := wickShort && c.bar.Close <= c.fast
-	// Model entry = a recent flagpole (overextension) FOLLOWED BY a kiss of the 21.
-	// The pole is mandatory (RequirePole); the tight/contracting pennant is an optional
-	// extra filter (RequireTightFlag, off by default so sharp micro-V kisses still fire).
-	poleOK := !m.cfg.RequirePole || separated
-	flagOK := !m.cfg.RequireTightFlag || c.flagTight
-	// Cooldown: at most one alert per direction per CooldownMin minutes. Like the
-	// pole/flag gates, a cooled-down touch leaves the setup ARMED, so the setup can
-	// alert again on the next qualifying kiss once the window has passed rather than
-	// being consumed by an alert nobody received.
-	cooled := m.cooling(m.regime, c.bar.BucketStart)
-	entryOK := poleOK && flagOK && !cooled
-	fired := false
-	if armedAtStart {
-		if (longTouch || shortTouch) && entryOK {
-			if longTouch && m.cfg.longEnabled() {
-				m.send(buildTouch(m.cfg, regimeLong, c, m.barsSinceCross))
-				m.outcomes.record(c.bar.BucketStart, c.bar.Close, true, c.sepPct, c.flagRangePct, m.barsSinceCross)
-				m.lastFire[regimeLong] = c.bar.BucketStart
-				fired = true
-			}
-			if shortTouch && m.cfg.shortEnabled() {
-				m.send(buildTouch(m.cfg, regimeShort, c, m.barsSinceCross))
-				m.outcomes.record(c.bar.BucketStart, c.bar.Close, false, c.sepPct, c.flagRangePct, m.barsSinceCross)
-				m.lastFire[regimeShort] = c.bar.BucketStart
-				fired = true
-			}
-			m.reArmed = false
-			if m.cfg.ReArmMode == ReArmFirstOnly {
-				m.disarm()
-			}
+	// (c) The model, one phase at a time: find a pole, then follow its flag.
+	if m.pole == nil {
+		m.seekPole(c)
+		return
+	}
+	m.advanceFlag(c)
+}
+
+// seekPole qualifies this bar as a flagpole's extreme when it is the furthest price
+// in the trend direction since the leg's origin (the most adverse price in the
+// MaxPoleBars window), the leg covers at least MinPoleMovePct, and price stands at
+// least MinPoleExtPct away from the 21 SMA. The window is what makes the pole
+// impulsive: a slow drift cannot cover the distance before its origin scrolls out.
+func (m *machine) seekPole(c barCtx) {
+	if len(m.leg) == 0 || c.fast <= 0 {
+		return
+	}
+	dir := float64(m.regime)
+	originIdx := 0
+	for i, b := range m.leg {
+		if (adverse(m.regime, m.leg[originIdx])-adverse(m.regime, b))*dir >= 0 {
+			originIdx = i // the latest bar holding the most adverse price
 		}
 	}
-	// Near-miss trace: only when the candle actually reached the 21 SMA band but no
-	// alert went out, so a "it touched, why no alert?" is answerable from the journal
-	// without per-bar spam.
-	if (wickLong || wickShort) && !fired {
-		m.logSuppressedTouch(c, longTouch || shortTouch, poleOK, flagOK, cooled, armedAtStart)
+	origin := adverse(m.regime, m.leg[originIdx])
+	ext := favorable(m.regime, c.bar)
+	for _, b := range m.leg[originIdx:] {
+		if (favorable(m.regime, b)-ext)*dir >= 0 {
+			return // not a new extreme since the origin — a pullback, not a pole
+		}
+	}
+	movePct := (ext - origin) * dir / origin * 100
+	extPct := (ext - c.fast) * dir / c.fast * 100
+	if movePct < m.cfg.MinPoleMovePct || extPct < m.cfg.MinPoleExtPct {
+		return
+	}
+	m.pole = &pole{origin: origin, extreme: ext, bars: len(m.leg) - originIdx, extFast: c.fast, extPct: extPct, flagDepth: ext}
+	m.logf("[SMARETEST] %s %s flagpole: %.2f%% in %d bars, %.2f%% from the 21 SMA — waiting for a flag into the 21",
+		c.bar.BucketStart.Format("15:04"), regimeName(m.regime), movePct, m.pole.bars, extPct)
+}
+
+// advanceFlag follows the flag after a qualified pole. A new extreme extends the pole
+// and restarts the flag; a pullback that gives back too much of the pole, closes
+// through the 21 SMA or drags on past MaxFlagBars breaks it. The first bar that
+// touches the 21 and closes back on the trend side completes the flag and decides the
+// setup: it alerts only if the flag took long enough, pulled back slower than the
+// pole, and the 21 is still curving in the trend direction.
+func (m *machine) advanceFlag(c barCtx) {
+	p, b, dir := m.pole, c.bar, float64(m.regime)
+	if ext := favorable(m.regime, b); (ext-p.extreme)*dir > 0 {
+		p.bars += p.flagBars + 1
+		p.extreme, p.flagBars, p.flagDepth, p.extFast = ext, 0, ext, c.fast
+		p.extPct = (ext - c.fast) * dir / c.fast * 100
+		return
+	}
+	p.flagBars++
+	if d := adverse(m.regime, b); (p.flagDepth-d)*dir > 0 {
+		p.flagDepth = d
 	}
 
-	// (d) Re-arm gate for the NEXT bar (debounce): require a close that left the band.
-	if !m.reArmed {
-		if m.regime == regimeLong && c.bar.Close > c.fast+c.band {
-			m.reArmed = true
-		}
-		if m.regime == regimeShort && c.bar.Close < c.fast-c.band {
-			m.reArmed = true
-		}
+	height := (p.extreme - p.origin) * dir
+	retrace := (p.extreme - p.flagDepth) * dir / height
+	touched := (adverse(m.regime, b)-c.fast)*dir <= c.band
+	held := (b.Close-c.fast)*dir >= 0
+	switch {
+	case retrace > m.cfg.MaxFlagRetrace:
+		m.dropPole(c, fmt.Sprintf("the pullback gave back %.0f%% of the pole (max %.0f%%) — a reversal, not a flag",
+			retrace*100, m.cfg.MaxFlagRetrace*100))
+		return
+	case touched && !held:
+		m.dropPole(c, "the flag closed through the 21 SMA — it did not hold")
+		return
+	case !touched && p.flagBars >= m.cfg.MaxFlagBars:
+		m.dropPole(c, fmt.Sprintf("no touch of the 21 SMA within %d bars — the flag went stale", m.cfg.MaxFlagBars))
+		return
+	case !touched:
+		return // the flag is still forming
+	}
+
+	slopePct, slopeOK := m.slopePct()
+	s := setupStats{
+		poleMovePct: height / p.origin * 100,
+		poleBars:    p.bars,
+		poleExtPct:  p.extPct,
+		flagBars:    p.flagBars,
+		retracePct:  retrace * 100,
+		catchUpPct:  catchUp(p, c.fast, dir) * 100,
+		slopePct:    slopePct,
+	}
+	poleSpeed := height / float64(p.bars)
+	flagSpeed := (p.extreme - p.flagDepth) * dir / float64(p.flagBars)
+	var reason string
+	switch {
+	case p.flagBars < m.cfg.MinFlagBars:
+		reason = fmt.Sprintf("only %d bar(s) after the pole — a snap back, no flag (min %d)", p.flagBars, m.cfg.MinFlagBars)
+	case s.catchUpPct < m.cfg.MinSMACatchUp*100:
+		reason = fmt.Sprintf("price fell back onto the 21 — the 21 closed only %.0f%% of the gap (min %.0f%%), a V, not a flag",
+			s.catchUpPct, m.cfg.MinSMACatchUp*100)
+	case flagSpeed > m.cfg.MaxFlagSpeedRatio*poleSpeed:
+		reason = fmt.Sprintf("the pullback ran at %.0f%% of the pole's speed (max %.0f%%) — a dump, not a flag",
+			flagSpeed/poleSpeed*100, m.cfg.MaxFlagSpeedRatio*100)
+	case !slopeOK || slopePct < m.cfg.MinSlopePct:
+		reason = fmt.Sprintf("the 21 SMA is not curving %s (%+.3f%% over %d bars, min %.3f%%)",
+			slopeWord(m.regime), slopePct, m.cfg.SlopeBars, m.cfg.MinSlopePct)
+	case m.cooling(m.regime, b.BucketStart):
+		reason = fmt.Sprintf("%s cooldown — a %s retest already alerted %.0fm ago (limit 1 per %dm per direction)",
+			regimeName(m.regime), regimeName(m.regime), b.BucketStart.Sub(m.lastFire[m.regime]).Minutes(), m.cfg.CooldownMin)
+	}
+	if reason != "" {
+		m.dropPole(c, "touched the 21 SMA but "+reason)
+		return
+	}
+
+	if !m.silent {
+		m.send(buildTouch(m.cfg, m.regime, c, s, m.barsSinceCross))
+		m.outcomes.record(b.BucketStart, b.Close, m.regime == regimeLong, s, m.barsSinceCross)
+	}
+	m.logf("[SMARETEST] %s %s model entry alerted: pole %.2f%% in %d bars, flag %d bars (%.0f%% retrace), 21 SMA %+.3f%%",
+		b.BucketStart.Format("15:04"), regimeName(m.regime), s.poleMovePct, s.poleBars, s.flagBars, s.retracePct, s.slopePct)
+	m.lastFire[m.regime] = b.BucketStart
+	m.setupsFired++
+	m.pole, m.leg = nil, m.leg[:0]
+	if m.cfg.MaxSetupsPerCross > 0 && m.setupsFired >= m.cfg.MaxSetupsPerCross {
+		m.disarm()
+	}
+}
+
+// dropPole abandons the current pole and restarts the pole search from this bar, so a
+// new pole cannot reuse an origin from before the failed flag.
+func (m *machine) dropPole(c barCtx, reason string) {
+	m.logf("[SMARETEST] %s %s setup dropped: %s | close=%.2f 21SMA=%.2f",
+		c.bar.BucketStart.Format("15:04"), regimeName(m.regime), reason, c.bar.Close, c.fast)
+	m.pole, m.leg = nil, m.leg[:0]
+}
+
+// slopePct is how far the 21 SMA moved over the last SlopeBars bars, as a % of its
+// current value, signed so positive means in the trend direction. ok is false until
+// enough readings exist.
+func (m *machine) slopePct() (float64, bool) {
+	n, k := len(m.fastHist), m.cfg.SlopeBars
+	if k <= 0 || n <= k || m.fastHist[n-1] <= 0 {
+		return 0, false
+	}
+	now, then := m.fastHist[n-1], m.fastHist[n-1-k]
+	return (now - then) * float64(m.regime) / now * 100, true
+}
+
+// pushLeg appends a bar to the pole-origin window, trimmed to MaxPoleBars.
+func (m *machine) pushLeg(b Bar) {
+	m.leg = append(m.leg, b)
+	if n := m.cfg.MaxPoleBars; n > 0 && len(m.leg) > n {
+		m.leg = m.leg[len(m.leg)-n:]
+	}
+}
+
+// pushFast records this bar's fast SMA, keeping SlopeBars+1 readings.
+func (m *machine) pushFast(fast float64) {
+	m.fastHist = append(m.fastHist, fast)
+	if n := m.cfg.SlopeBars + 1; len(m.fastHist) > n {
+		m.fastHist = m.fastHist[len(m.fastHist)-n:]
 	}
 }
 
@@ -262,38 +353,38 @@ func (m *machine) cooling(regime int, barTime time.Time) bool {
 	return barTime.Sub(last) < time.Duration(m.cfg.CooldownMin)*time.Minute
 }
 
+// enabled reports whether alerts in this regime's direction are configured.
+func (m *machine) enabled(regime int) bool {
+	return (regime == regimeLong && m.cfg.longEnabled()) || (regime == regimeShort && m.cfg.shortEnabled())
+}
+
 // disarm sets state = IDLE; a new cross re-arms.
 func (m *machine) disarm() {
 	m.armed = false
-	m.reArmed = false
+	m.pole = nil
 }
 
-// logSuppressedTouch explains why a candle that reached the 21 SMA band did NOT
-// alert. It names the single dominant cause so the journal answers "it touched the
-// 21 — why no alert?" directly. closeOK is true when the close was already on the
-// correct side (i.e. the wick-out filter passed and the block was elsewhere).
-func (m *machine) logSuppressedTouch(c barCtx, closeOK, poleOK, flagOK, cooled, armedAtStart bool) {
-	var reason string
-	switch {
-	case !armedAtStart:
-		reason = "setup not re-armed yet — price has not closed back outside the 21 SMA band since the last touch"
-	case !closeOK:
-		reason = "wicked the 21 SMA but CLOSED on the wrong side — support/resistance did not hold (wick-out filter)"
-	case !poleOK:
-		reason = fmt.Sprintf("no recent flagpole — price was not >= %.2f%% from the 21 within the last %d bars (peak %.2f%%); chop, not an impulse", m.cfg.MinSeparationPct, m.cfg.PoleWindow, c.sepPct)
-	case !flagOK:
-		reason = "pennant not tight/contracting yet (RequireTightFlag is on)"
-	case cooled:
-		reason = fmt.Sprintf("%s cooldown — a %s retest already alerted %.0fm ago (limit 1 per %dm per direction)",
-			regimeName(m.regime), regimeName(m.regime), c.bar.BucketStart.Sub(m.lastFire[m.regime]).Minutes(), m.cfg.CooldownMin)
-	default:
-		reason = "direction disabled for this regime"
+// logf logs a journal line unless the machine is silently replaying history.
+func (m *machine) logf(format string, args ...any) {
+	if !m.silent {
+		log.Printf(format, args...)
 	}
-	dist := (c.bar.Close - c.fast) / c.fast * 100
-	log.Printf("[SMARETEST] %s TOUCH suppressed: %s | close=%.2f 21SMA=%.2f (%+.2f%%) regime=%s armed=%t reArmed=%t poleOK=%t poleDepth=%.2f%% flagTight=%t flagRange=%.2f%%",
-		c.bar.BucketStart.Format("15:04"), reason, c.bar.Close, c.fast, dist,
-		regimeName(m.regime), m.armed, armedAtStart, poleOK, c.sepPct,
-		c.flagTight, c.flagRangePct)
+}
+
+// favorable returns the bar's extreme in the trend direction (high for a long, low
+// for a short); adverse returns the extreme against it.
+func favorable(regime int, b Bar) float64 {
+	if regime == regimeLong {
+		return b.High
+	}
+	return b.Low
+}
+
+func adverse(regime int, b Bar) float64 {
+	if regime == regimeLong {
+		return b.Low
+	}
+	return b.High
 }
 
 // regimeName renders a regime constant for logs.
@@ -306,4 +397,12 @@ func regimeName(r int) string {
 	default:
 		return "none"
 	}
+}
+
+// slopeWord names the 21 SMA direction a regime needs.
+func slopeWord(r int) string {
+	if r == regimeShort {
+		return "down"
+	}
+	return "up"
 }

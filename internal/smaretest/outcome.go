@@ -47,8 +47,9 @@ func newOutcomeTracker(horizonsMin []int) *outcomeTracker {
 }
 
 // record logs the T0 entry line and queues the forward horizons. entry is the touch
-// bar's close; t0 is that bar's bucket start (the join key). long marks the regime.
-func (o *outcomeTracker) record(t0 time.Time, entry float64, long bool, sepPct, flagRangePct float64, barsSinceCross int) {
+// bar's close; t0 is that bar's bucket start (the join key). long marks the regime;
+// s is the pole/flag shape of the setup.
+func (o *outcomeTracker) record(t0 time.Time, entry float64, long bool, s setupStats, barsSinceCross int) {
 	if o == nil {
 		return
 	}
@@ -58,8 +59,8 @@ func (o *outcomeTracker) record(t0 time.Time, entry float64, long bool, sepPct, 
 	}
 	id := t0.Format("20060102T150405Z")
 	o.emit(fmt.Sprintf(
-		"[SMARETEST-OUTCOME-T0] id=%s dir=%s entry=%.2f sep=%.2f%% flagRange=%.2f%% barsSinceCross=%d",
-		id, dir, entry, sepPct, flagRangePct, barsSinceCross))
+		"[SMARETEST-OUTCOME-T0] id=%s dir=%s entry=%.2f pole=%.2f%% poleBars=%d poleExt=%.2f%% flagBars=%d retrace=%.0f%% catchUp=%.0f%% slope=%.3f%% barsSinceCross=%d",
+		id, dir, entry, s.poleMovePct, s.poleBars, s.poleExtPct, s.flagBars, s.retracePct, s.catchUpPct, s.slopePct, barsSinceCross))
 	if len(o.horizons) == 0 || entry <= 0 {
 		return
 	}

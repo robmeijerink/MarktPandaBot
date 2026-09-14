@@ -59,47 +59,36 @@ func warmBoot(cfg Config, ind *indicators, m *machine, tracker *bucketTracker, c
 		return
 	}
 
-	for _, b := range bars {
-		ind.push(b)
-	}
+	replayHistory(m, bars)
 	if last, ok := ind.lastBucket(); ok {
 		tracker.update(last) // live bars at/<= this bucket are skipped as duplicates
 	}
 
-	if !ind.ready(cfg.SlowPeriod) {
+	switch {
+	case !ind.ready(cfg.SlowPeriod):
 		log.Printf("[SMARETEST] Warm boot hydrated %d bars (< SlowPeriod %d); waiting for more before arming.",
 			ind.fill(), cfg.SlowPeriod)
-		return
+	case m.regime == regimeNone:
+		log.Printf("[SMARETEST] Warm boot complete: %d bars, no 21/%d cross in history; waiting for the next cross.",
+			ind.fill(), cfg.SlowPeriod)
+	default:
+		log.Printf("[SMARETEST] Warm boot complete: %d bars, regime=%s, %d bars since cross, armed=%t, flagpole in progress=%t. Replayed silently (no alert).",
+			ind.fill(), regimeName(m.regime), m.barsSinceCross, m.armed, m.pole != nil)
 	}
-
-	armFromHistory(cfg, ind, m)
-	regimeName := "LONG (golden cross)"
-	if m.regime == regimeShort {
-		regimeName = "SHORT (death cross)"
-	}
-	log.Printf("[SMARETEST] Warm boot complete: %d bars, regime=%s, ~%d bars since cross. Armed silently (no alert).",
-		ind.fill(), regimeName, m.barsSinceCross)
 }
 
-// armFromHistory sets the initial regime SILENTLY from already-hydrated indicators
-// (§3 step 3): regime = sign(SMA21 - SMA200), state = ARMED, reArmed = true. It
-// emits no alert; touches may fire on the first qualifying live bar even though the
-// cross is historical. Indicators must already be ready.
-func armFromHistory(cfg Config, ind *indicators, m *machine) {
-	fast, _ := ind.sma(cfg.FastPeriod)
-	slow, _ := ind.sma(cfg.SlowPeriod)
-	if fast > slow {
-		m.regime = regimeLong
-	} else {
-		m.regime = regimeShort
+// replayHistory runs historical bars through the state machine SILENTLY (§3): no
+// alert, outcome or journal line is emitted, but the regime, a pole or flag still in
+// progress, the setups already used up and the cooldown timers are rebuilt exactly as
+// if the module had been running. A restart therefore neither misses a flag that is
+// forming nor re-alerts a setup that already completed. The model needs an observed
+// cross, so a trend whose cross predates the history stays unarmed until the next one.
+func replayHistory(m *machine, bars []Bar) {
+	m.silent = true
+	defer func() { m.silent = false }()
+	for _, b := range bars {
+		m.processBar(b)
 	}
-	m.armed = true
-	m.reArmed = true // first qualifying live bar may fire even though the cross is historical
-	m.prevFast, m.prevSlow, m.havePrev = fast, slow, true
-	m.barsSinceCross = ind.barsSinceLastCross(cfg.FastPeriod, cfg.SlowPeriod)
-	// Seed the flagpole ring from recent history so a pole that formed just before
-	// startup is not forgotten and the first qualifying live kiss can still fire.
-	m.poleRing = ind.recentSeparations(cfg.FastPeriod, cfg.PoleWindow, m.regime)
 }
 
 // restFallback polls one closed bar per timeframe boundary, but ONLY when the

@@ -8,34 +8,33 @@ import (
 // buildTouch renders the independent SMA-retest alert (§5). It uses a distinct
 // 📐 prefix so the feed stays readable next to the existing alerts, and is sent
 // as a brand-new message — it never reuses or appends to existing strings.
-func buildTouch(cfg Config, regime int, c barCtx, barsSinceCross int) string {
+func buildTouch(cfg Config, regime int, c barCtx, s setupStats, barsSinceCross int) string {
 	roomPct := math.Abs(c.bar.Close-c.slow) / c.bar.Close * 100
-	if regime == regimeLong {
-		return fmt.Sprintf(
-			"📐 SMA RETEST — LONG (%s)\n"+
-				"%s  @ %.2f\n"+
-				"21 SMA: %.2f   |   200 SMA: %.2f\n"+
-				"Touch low: %.2f\n"+
-				"Room to 200 SMA: %.2f%%\n"+
-				"Flagpole: %.2f%% overextension (within last %d bars)\n"+
-				"Flag: %.2f%% tight range over %d bars\n"+
-				"Regime: %d bars since golden cross\n"+
-				"Flagpole + flag + kiss of the 21 SMA (support held) — model entry.",
-			cfg.Timeframe, displaySymbol(cfg.Symbol), c.bar.Close,
-			c.fast, c.slow, c.bar.Low, roomPct, c.sepPct, cfg.PoleWindow, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
+	side, touchLabel, touch, away, slope, cross, held := "LONG", "Touch low", c.bar.Low, "above", "rising", "golden cross", "support held"
+	if regime == regimeShort {
+		side, touchLabel, touch, away, slope, cross, held = "SHORT", "Touch high", c.bar.High, "below", "falling", "death cross", "resistance held"
 	}
 	return fmt.Sprintf(
-		"📐 SMA RETEST — SHORT (%s)\n"+
+		"📐 SMA RETEST — %s (%s)\n"+
 			"%s  @ %.2f\n"+
 			"21 SMA: %.2f   |   200 SMA: %.2f\n"+
-			"Touch high: %.2f\n"+
+			"%s: %.2f\n"+
 			"Room to 200 SMA: %.2f%%\n"+
-			"Flagpole: %.2f%% overextension (within last %d bars)\n"+
-			"Flag: %.2f%% tight range over %d bars\n"+
-			"Regime: %d bars since death cross\n"+
-			"Flagpole + flag + kiss of the 21 SMA (resistance held) — model entry.",
-		cfg.Timeframe, displaySymbol(cfg.Symbol), c.bar.Close,
-		c.fast, c.slow, c.bar.High, roomPct, c.sepPct, cfg.PoleWindow, c.flagRangePct, cfg.FlagLookback, barsSinceCross)
+			"Flagpole: %.2f%% in %d bars (%.2f%% %s the 21)\n"+
+			"Flag: %d bars, gave back %.0f%% of the pole; the 21 closed %.0f%% of the gap\n"+
+			"21 SMA %s: %.3f%% over %d bars\n"+
+			"Regime: %d bars since %s\n"+
+			"Cross + flagpole + flag + kiss of the %s 21 SMA (%s) — model entry.",
+		side, cfg.Timeframe,
+		displaySymbol(cfg.Symbol), c.bar.Close,
+		c.fast, c.slow,
+		touchLabel, touch,
+		roomPct,
+		s.poleMovePct, s.poleBars, s.poleExtPct, away,
+		s.flagBars, s.retracePct, s.catchUpPct,
+		slope, s.slopePct, cfg.SlopeBars,
+		barsSinceCross, cross,
+		slope, held)
 }
 
 // buildInvalidation renders the optional note sent when price reaches the 200 SMA

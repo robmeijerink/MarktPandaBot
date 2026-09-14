@@ -1,9 +1,9 @@
 // Package smaretest is a fully self-contained 21/200 SMA pullback/retest alert
-// module. After a 21/200 SMA cross sets the trend on closed 1m candles, it waits
-// for price to MOVE AWAY from the lines (separation) and then tighten into a
-// contracting range, then takes a bar-close touch of the 21 SMA (dynamic support
-// for longs / resistance for shorts) as the entry confirmation; a pullback all
-// the way to the 200 SMA invalidates the setup.
+// module. It detects the Sam Price / CryptoLifer "model" on closed 1m candles as an
+// ordered sequence: a 21/200 SMA cross sets the trend, price launches an impulsive
+// flagpole away from the 21 SMA, pulls back in a slower flag while the 21 catches up,
+// and the flag's first touch of a 21 that is still curving in the trend direction is
+// the entry. A pullback all the way to the 200 SMA invalidates the setup.
 //
 // ISOLATION: this package owns all of its state, files and messages. It does not
 // read or depend on the liquidation/reversal feature or any existing alert logic.
@@ -20,12 +20,6 @@ const (
 	DirShort = "short"
 )
 
-// Re-arm modes for Config.ReArmMode.
-const (
-	ReArmDebounce  = "debounce"
-	ReArmFirstOnly = "firstOnly"
-)
-
 // Config is the single source of truth for the module. The comments give the
 // locked/default values; tuning needs no code change.
 type Config struct {
@@ -34,7 +28,7 @@ type Config struct {
 	Timeframe       string // "1m" — the timeframe Sam Price / CryptoLifer runs this model on
 	FastPeriod      int    // 21
 	SlowPeriod      int    // 200
-	WarmBootBars    int    // 400 — must be >= SlowPeriod plus headroom (1m crosses are frequent)
+	WarmBootBars    int    // 1000 — replayed silently on startup; must be >= SlowPeriod plus room to see the last cross
 
 	Directions string // "both" (locked) | "long" | "short"
 
@@ -44,32 +38,42 @@ type Config struct {
 	ATRPeriod       int     // 14
 	ATRMult         float64 // 0.25
 
-	// Flagpole gate (TUNABLE). Sam Price's "model" enters on a pullback that KISSES
-	// the 21 SMA, but only after a real flagpole: a sudden, aggressive move in the
-	// trend direction that overextends price away from the 21 and leaves a gap. These
-	// two knobs encode that pole. MinSeparationPct is how far price must have reached
-	// from the 21 SMA (in the trend direction) — the depth of the gap. PoleWindow is
-	// how RECENTLY that overextension must have happened: the peak must fall inside the
-	// last PoleWindow bars, which also stands in for "aggressive" (covering the gap
-	// within a short window IS an impulse; a slow drift never reaches the depth in
-	// time). The kiss bar itself is excluded, so the pole is always a PRIOR move and
-	// the touch proves the return. Disable with RequirePole=false.
-	RequirePole      bool    // true — require a recent flagpole before the kiss
-	MinSeparationPct float64 // 0.2 — the flagpole must have reached >= this % away from the 21 SMA
-	PoleWindow       int     // 20 — bars; the overextension must have peaked within this many recent bars
+	// Flagpole (TUNABLE). After the cross, price must launch an impulsive leg in the
+	// trend direction: from its origin (the lowest low in the window, for a long) to a
+	// new extreme at least MinPoleMovePct away, covered within MaxPoleBars bars — a slow
+	// drift never gets there in time. At the extreme price must also stand at least
+	// MinPoleExtPct away from the 21 SMA: that gap is what the flag later closes. The
+	// extreme is made after the cross; the leg's origin may predate it (the rally that
+	// caused the cross).
+	MinPoleMovePct float64 // 0.3
+	MaxPoleBars    int     // 15
+	MinPoleExtPct  float64 // 0.15
 
-	// Tight-flag / pennant gate (ON by default). A kiss only fires once the pullback
-	// has formed a real flag: a tight, contracting range in the bars just before the
-	// touch. This is what stops the alert firing on the very FIRST poke at the 21 after
-	// the pole (a sharp micro-V with no consolidation) — it waits for price to settle
-	// into a flag first. Turn it off to also take those immediate V-shape kisses.
-	RequireTightFlag     bool    // true — require a tight, contracting range (a flag) into the touch
-	FlagLookback         int     // 12 — bars (ending just before the touch bar) that form the range
-	FlagMaxRangePct      float64 // 0.3 — recent-half range height must be <= this % of price (only used when RequireTightFlag)
-	FlagContractionRatio float64 // 0.8 — recent-half range <= ratio*earlier-half range (only used when RequireTightFlag)
+	// Flag (TUNABLE): the pullback after the pole's extreme, up to and including the
+	// first bar that touches the 21 SMA. That first touch decides the setup — it alerts
+	// only if every rule below holds, and either way the pole is consumed (another alert
+	// needs a fresh pole). A new extreme before the touch extends the pole and restarts
+	// the flag; a close through the 21 SMA breaks it.
+	//
+	// MinSMACatchUp is what tells a flag from a V. At the pole's extreme there is a gap
+	// between price and the 21 SMA; by the touch it is closed. In a flag price drifts
+	// sideways and the 21 catches up to it; in a V price falls straight back onto the 21.
+	// It is the share of that gap closed by the 21 moving rather than by price.
+	MinFlagBars       int     // 5 — a touch sooner than this is a snap back, not a flag
+	MaxFlagBars       int     // 30 — a flag that has not reached the 21 by then is stale
+	MaxFlagRetrace    float64 // 0.7 — the flag may give back at most this fraction of the pole
+	MaxFlagSpeedRatio float64 // 1.2 — the flag may pull back at most this multiple of the pole's speed (per bar); catches dumps the catch-up rule lets through
+	MinSMACatchUp     float64 // 0.33 — the 21 SMA must close at least this share of the pole's gap to price
 
-	// Re-arm / anti-spam (TUNABLE).
-	ReArmMode string // "debounce" (default) | "firstOnly"
+	// 21 SMA slope (TUNABLE): at the touch the 21 must still be curving in the trend
+	// direction — rising into a long, falling into a short — not flat or rolling over.
+	SlopeBars   int     // 5
+	MinSlopePct float64 // 0.02 — the 21 SMA must have moved >= this % over SlopeBars bars
+
+	// Anti-spam (TUNABLE).
+	// MaxSetupsPerCross caps the alerts per 21/200 cross (0 = unlimited). Each alert
+	// already needs its own pole and flag; this keeps it to the model's first setup.
+	MaxSetupsPerCross int // 1
 	// CooldownMin silences a second retest alert in the SAME direction within this
 	// many minutes of the last one (0 = off). LONG and SHORT keep independent timers,
 	// so a regime flip can still alert immediately. It applies only to this module's
@@ -98,20 +102,23 @@ func DefaultConfig() Config {
 		Timeframe:            "1m",
 		FastPeriod:           21,
 		SlowPeriod:           200,
-		WarmBootBars:         400,
+		WarmBootBars:         1000,
 		Directions:           DirBoth,
 		UseATRTolerance:      false,
 		TouchTolPct:          0.04,
 		ATRPeriod:            14,
 		ATRMult:              0.25,
-		RequirePole:          true,
-		MinSeparationPct:     0.2,
-		PoleWindow:           20,
-		RequireTightFlag:     true,
-		FlagLookback:         12,
-		FlagMaxRangePct:      0.3,
-		FlagContractionRatio: 0.8,
-		ReArmMode:            ReArmDebounce,
+		MinPoleMovePct:       0.3,
+		MaxPoleBars:          15,
+		MinPoleExtPct:        0.15,
+		MinFlagBars:          5,
+		MaxFlagBars:          30,
+		MaxFlagRetrace:       0.7,
+		MaxFlagSpeedRatio:    1.2,
+		MinSMACatchUp:        0.33,
+		SlopeBars:            5,
+		MinSlopePct:          0.02,
+		MaxSetupsPerCross:    1,
 		CooldownMin:          15,
 		EmitInvalidation:     false,
 		BarCloseGraceSec:     3,

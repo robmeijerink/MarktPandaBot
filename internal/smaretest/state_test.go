@@ -1,390 +1,386 @@
 package smaretest
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
-// testMachine builds a machine with a capturing send func and the given config.
-func testMachine(t *testing.T, cfg Config) (*machine, *[]string) {
-	t.Helper()
-	var sent []string
-	m := newMachine(cfg, newIndicators(cfg), func(s string) { sent = append(sent, s) })
-	return m, &sent
-}
+var testT0 = time.UnixMilli(1_700_000_000_000).UTC()
 
 func bar(o, h, l, c float64) Bar { return Bar{Open: o, High: h, Low: l, Close: c} }
 
-// ctx assembles a barCtx with explicit indicator readings so the decision logic
-// can be tested without engineering 200-bar SMA series. flagTight defaults to true
-// so the optional pennant gate never blocks; the flagpole gate is driven by the
-// machine's poleRing state and has its own dedicated test.
-func ctx(fast, slow, prevFast, prevSlow, band float64, b Bar) barCtx {
-	return barCtx{fast: fast, slow: slow, prevFast: prevFast, prevSlow: prevSlow, havePrev: true, band: band, bar: b, flagTight: true}
-}
-
-// Test 1: cross detection — a sign flip of (SMA21-SMA200) sets the regime; no flip
-// leaves it unchanged.
-func TestCrossDetection(t *testing.T) {
+// testConfig pins every model threshold the scripted scenarios are built around, so
+// retuning DefaultConfig does not silently change what these tests exercise.
+func testConfig() Config {
 	cfg := DefaultConfig()
-
-	// prev: fast<slow (short), cur: fast>slow (long) => golden cross => LONG, armed.
-	// Price sits clear of the band so this bar only tests the cross, not a touch.
-	m, _ := testMachine(t, cfg)
-	m.decide(ctx(101, 100, 99, 100, 0.05, bar(101.5, 101.6, 101.2, 101.5)))
-	if m.regime != regimeLong || !m.armed || !m.reArmed {
-		t.Fatalf("golden cross: regime=%d armed=%v reArmed=%v", m.regime, m.armed, m.reArmed)
-	}
-	if m.barsSinceCross != 0 {
-		t.Fatalf("barsSinceCross should reset to 0 on cross, got %d", m.barsSinceCross)
-	}
-
-	// prev: fast>slow, cur: fast<slow => death cross => SHORT (clear of the band).
-	m2, _ := testMachine(t, cfg)
-	m2.decide(ctx(99, 100, 101, 100, 0.05, bar(98.5, 98.8, 98.4, 98.5)))
-	if m2.regime != regimeShort || !m2.armed {
-		t.Fatalf("death cross: regime=%d armed=%v", m2.regime, m2.armed)
-	}
-
-	// no flip: same side both bars => no regime change from an already-armed long.
-	m3, _ := testMachine(t, cfg)
-	m3.regime, m3.armed, m3.reArmed = regimeLong, true, true
-	m3.barsSinceCross = 5
-	m3.decide(ctx(102, 100, 103, 100, 0.05, bar(102, 102.5, 101.9, 102))) // no touch, no flip
-	if m3.regime != regimeLong {
-		t.Fatalf("no flip should keep regime LONG, got %d", m3.regime)
-	}
-	if m3.barsSinceCross != 6 {
-		t.Fatalf("barsSinceCross should advance to 6, got %d", m3.barsSinceCross)
-	}
-}
-
-// Test 2: wick-out rejection — a bar whose low pierces the band but closes below
-// the 21 SMA does NOT fire a LONG touch; one closing back above DOES. Mirror short.
-func TestWickOutRejection(t *testing.T) {
-	cfg := DefaultConfig()
-	band := 0.05
-
-	// LONG, armed: low pierces (<= fast+band) but close below fast => rejected.
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
-	m.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.04, 99.90, 99.95))) // close < fast
-	if len(*sent) != 0 {
-		t.Fatalf("wick-out (close below SMA) must not fire LONG, got %d alerts", len(*sent))
-	}
-
-	// LONG, armed: low touches band and close back above fast => fires.
-	m2, sent2 := testMachine(t, cfg)
-	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, []float64{1}
-	m2.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01))) // low<=100.05, close>=100
-	if len(*sent2) != 1 {
-		t.Fatalf("valid LONG touch should fire exactly 1 alert, got %d", len(*sent2))
-	}
-
-	// SHORT, armed: high pierces but close above fast => rejected.
-	m3, sent3 := testMachine(t, cfg)
-	m3.regime, m3.armed, m3.reArmed, m3.poleRing = regimeShort, true, true, []float64{1}
-	m3.decide(ctx(100, 110, 100, 110, band, bar(99.98, 100.10, 99.96, 100.05))) // close > fast
-	if len(*sent3) != 0 {
-		t.Fatalf("wick-out (close above SMA) must not fire SHORT, got %d alerts", len(*sent3))
-	}
-
-	// SHORT, armed: high touches band and close back below fast => fires.
-	m4, sent4 := testMachine(t, cfg)
-	m4.regime, m4.armed, m4.reArmed, m4.poleRing = regimeShort, true, true, []float64{1}
-	m4.decide(ctx(100, 110, 100, 110, band, bar(99.98, 100.03, 99.94, 99.99)))
-	if len(*sent4) != 1 {
-		t.Fatalf("valid SHORT touch should fire exactly 1 alert, got %d", len(*sent4))
-	}
-}
-
-// Test 3: invalidation — a bar reaching the 200 SMA disarms the regime.
-func TestInvalidation(t *testing.T) {
-	cfg := DefaultConfig()
-
-	// LONG: low reaches the 200 SMA => disarm, no touch alert (EmitInvalidation off).
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed = regimeLong, true, true
-	m.decide(ctx(100, 95, 100, 95, 0.05, bar(99, 99, 94.9, 96))) // low 94.9 <= slow 95
-	if m.armed {
-		t.Fatalf("LONG invalidation should disarm")
-	}
-	if len(*sent) != 0 {
-		t.Fatalf("invalidation with EmitInvalidation=false must be silent, got %d", len(*sent))
-	}
-
-	// SHORT: high reaches the 200 SMA => disarm. With EmitInvalidation on => 1 note.
-	cfg2 := DefaultConfig()
-	cfg2.EmitInvalidation = true
-	m2, sent2 := testMachine(t, cfg2)
-	m2.regime, m2.armed, m2.reArmed = regimeShort, true, true
-	m2.decide(ctx(100, 105, 100, 105, 0.05, bar(101, 105.1, 101, 104))) // high 105.1 >= slow 105
-	if m2.armed {
-		t.Fatalf("SHORT invalidation should disarm")
-	}
-	if len(*sent2) != 1 {
-		t.Fatalf("invalidation note expected, got %d", len(*sent2))
-	}
-}
-
-// Test 4: re-arm debounce — after a touch, no second touch fires until a bar closes
-// outside the band; firstOnly fires exactly once per regime.
-func TestReArmDebounce(t *testing.T) {
-	band := 0.05
-
-	cfg := DefaultConfig()
-	cfg.ReArmMode = ReArmDebounce
-	cfg.CooldownMin = 0 // isolate the re-arm debounce from the per-direction cooldown
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
-
-	// Bar A: valid touch => fires, reArmed=false.
-	m.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
-	if len(*sent) != 1 || m.reArmed {
-		t.Fatalf("bar A should fire and clear reArmed: alerts=%d reArmed=%v", len(*sent), m.reArmed)
-	}
-	// Bar B: another touch while still not re-armed => no fire.
-	m.decide(ctx(100, 90, 100, 90, band, bar(100.01, 100.05, 99.98, 100.0)))
-	if len(*sent) != 1 {
-		t.Fatalf("bar B must not fire before re-arm, alerts=%d", len(*sent))
-	}
-	// Bar C: close leaves the band (above fast+band) => re-arm.
-	m.decide(ctx(100, 90, 100, 90, band, bar(100.2, 100.3, 100.1, 100.2)))
-	if !m.reArmed {
-		t.Fatalf("bar C close outside band should re-arm")
-	}
-	// Bar D: touch again => fires (second alert).
-	m.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
-	if len(*sent) != 2 {
-		t.Fatalf("bar D should fire after re-arm, alerts=%d", len(*sent))
-	}
-
-	// firstOnly: fires once then disarms for the regime.
-	cfgF := DefaultConfig()
-	cfgF.ReArmMode = ReArmFirstOnly
-	cfgF.CooldownMin = 0
-	mf, sentF := testMachine(t, cfgF)
-	mf.regime, mf.armed, mf.reArmed, mf.poleRing = regimeLong, true, true, []float64{1}
-	mf.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
-	if len(*sentF) != 1 || mf.armed {
-		t.Fatalf("firstOnly should fire once and disarm: alerts=%d armed=%v", len(*sentF), mf.armed)
-	}
-	mf.decide(ctx(100, 90, 100, 90, band, bar(100.02, 100.06, 99.97, 100.01)))
-	if len(*sentF) != 1 {
-		t.Fatalf("firstOnly must not fire again, alerts=%d", len(*sentF))
-	}
-}
-
-// Test 5: same-bar exclusivity — a single bar never both re-arms and fires.
-func TestSameBarExclusivity(t *testing.T) {
-	cfg := DefaultConfig()
-	band := 0.05
-
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied; isolate arm-state logic
-	// Not re-armed at start; a single bar that both touches and closes outside the
-	// band must NOT fire (touch uses armedAtStart) but SHOULD re-arm for next bar.
-	m.reArmed = false
-	m.decide(ctx(100, 90, 100, 90, band, bar(100.2, 100.3, 99.99, 100.2))) // low touches, close > band
-	if len(*sent) != 0 {
-		t.Fatalf("bar must not fire while reArmed=false at start, alerts=%d", len(*sent))
-	}
-	if !m.reArmed {
-		t.Fatalf("bar should have re-armed for the next bar")
-	}
-}
-
-// Test 6: warm boot establishes the regime silently and lets the first live
-// qualifying bar fire.
-func TestWarmBootSilentThenFire(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.FastPeriod = 2
-	cfg.SlowPeriod = 3
-	cfg.WarmBootBars = 10
-	cfg.TouchTolPct = 0.05
-	cfg.RequireTightFlag = false // this test exercises warm-boot firing, not the flag gate
-
-	ind := newIndicators(cfg)
-	var sent []string
-	m := newMachine(cfg, ind, func(s string) { sent = append(sent, s) })
-
-	// Hydrate a clearly-uptrending series so SMA2 > SMA3 (LONG regime).
-	closes := []float64{100, 101, 102, 103, 104, 105}
-	base := int64(1_700_000_000_000)
-	for i, c := range closes {
-		ind.push(Bar{BucketStart: msTime(base + int64(i)*60000), Open: c, High: c, Low: c, Close: c})
-	}
-
-	// Exercise the real silent-arming path used by warm boot.
-	armFromHistory(cfg, ind, m)
-	if m.regime != regimeLong {
-		t.Fatalf("warm boot should establish LONG, got %d", m.regime)
-	}
-	if !m.armed || !m.reArmed {
-		t.Fatalf("warm boot should arm: armed=%v reArmed=%v", m.armed, m.reArmed)
-	}
-	if len(sent) != 0 {
-		t.Fatalf("warm boot must be silent, got %d alerts", len(sent))
-	}
-
-	// First live bar: close 105 lands exactly on the post-push SMA2 = (105+105)/2,
-	// the low dips into the band, and it does not breach SMA3 (≈104.67). It should
-	// fire exactly once even though the cross was historical.
-	live := Bar{BucketStart: msTime(base + 6*60000), Open: 105, High: 105.1, Low: 104.9, Close: 105}
-	m.processBar(live)
-	if len(sent) != 1 {
-		t.Fatalf("first qualifying live bar should fire exactly once, got %d", len(sent))
-	}
-}
-
-// Test 7: optional tight-flag/pennant gate — with RequireTightFlag ON, a valid
-// flagpole+kiss is still suppressed unless the pullback is a tight range (arm
-// preserved so a later tight touch fires); with it OFF (the default) the pennant is
-// not required and a sharp (non-tight) kiss fires.
-func TestTightFlagGate(t *testing.T) {
-	band := 0.05
-	touch := bar(100.02, 100.06, 99.97, 100.01) // low<=fast+band, close>=fast
-
-	// RequireTightFlag ON, pole satisfied, flag NOT tight => suppressed, arm preserved.
-	cfg := DefaultConfig()
-	cfg.RequireTightFlag = true
-	cfg.ReArmMode = ReArmDebounce // so the suppressed touch does not disarm the regime
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied; isolate the flag gate
-	c := ctx(100, 90, 100, 90, band, touch)
-	c.flagTight = false
-	m.decide(c)
-	if len(*sent) != 0 {
-		t.Fatalf("touch without a tight pennant must not fire when RequireTightFlag is on, got %d", len(*sent))
-	}
-	if !m.reArmed {
-		t.Fatalf("suppressed touch must leave the setup armed to keep waiting")
-	}
-
-	// Same machine, next qualifying bar WITH a tight flag => fires (pole ring still deep).
-	m.decide(ctx(100, 90, 100, 90, band, touch)) // ctx() sets flagTight=true
-	if len(*sent) != 1 {
-		t.Fatalf("tight-pennant touch should fire exactly once, got %d", len(*sent))
-	}
-
-	// RequireTightFlag OFF: a non-tight kiss with a pole fires immediately.
-	cfg2 := DefaultConfig()
-	cfg2.RequireTightFlag = false
-	m2, sent2 := testMachine(t, cfg2)
-	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, []float64{1}
-	c2 := ctx(100, 90, 100, 90, band, touch)
-	c2.flagTight = false
-	m2.decide(c2)
-	if len(*sent2) != 1 {
-		t.Fatalf("with RequireTightFlag=false the kiss should fire, got %d", len(*sent2))
-	}
-}
-
-// Test 8: flagpole gate — a kiss with no recent flagpole in the ring is suppressed
-// (arm preserved); once the ring holds a deep-enough overextension it fires; a
-// sub-threshold pole stays suppressed; RequirePole=false bypasses the gate.
-func TestFlagpoleGate(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.ReArmMode = ReArmDebounce // so a suppressed touch does not disarm the regime
-	cfg.MinSeparationPct = 0.3    // the pole must have reached >= 0.3% from the 21 SMA
-	band := 0.05
-	touch := bar(100.02, 100.06, 99.97, 100.01) // low<=fast+band, close>=fast
-
-	// Empty ring => no flagpole => suppressed, arm preserved.
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, nil
-	m.decide(ctx(100, 90, 100, 90, band, touch)) // flagTight=true from ctx()
-	if len(*sent) != 0 {
-		t.Fatalf("a kiss with no recent flagpole must not fire, got %d", len(*sent))
-	}
-	if !m.reArmed {
-		t.Fatalf("suppressed (no-pole) touch must leave the setup armed")
-	}
-
-	// Ring now holds a 0.5% overextension => next kiss fires.
-	m.poleRing = []float64{0.005}
-	m.decide(ctx(100, 90, 100, 90, band, touch))
-	if len(*sent) != 1 {
-		t.Fatalf("flagpole + kiss should fire exactly once, got %d", len(*sent))
-	}
-
-	// A pole just under the threshold stays suppressed.
-	mu, sentU := testMachine(t, cfg)
-	mu.regime, mu.armed, mu.reArmed, mu.poleRing = regimeLong, true, true, []float64{0.0029} // 0.29% < 0.30%
-	mu.decide(ctx(100, 90, 100, 90, band, touch))
-	if len(*sentU) != 0 {
-		t.Fatalf("sub-threshold pole (0.29%% < 0.30%%) must not fire, got %d", len(*sentU))
-	}
-
-	// RequirePole=false bypasses the flagpole gate entirely.
-	cfg2 := DefaultConfig()
-	cfg2.RequirePole = false
-	m2, sent2 := testMachine(t, cfg2)
-	m2.regime, m2.armed, m2.reArmed, m2.poleRing = regimeLong, true, true, nil
-	m2.decide(ctx(100, 90, 100, 90, band, touch))
-	if len(*sent2) != 1 {
-		t.Fatalf("with RequirePole=false the kiss should fire, got %d", len(*sent2))
-	}
-}
-
-// Test 9: per-direction cooldown — after a LONG alert, further LONG alerts are
-// silenced for CooldownMin minutes (the setup stays armed and fires again once the
-// window has passed), while the SHORT side keeps its own independent timer.
-func TestDirectionCooldown(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.ReArmMode = ReArmDebounce
+	cfg.OutcomeHorizonsMin = nil
+	cfg.TouchTolPct = 0.04
+	cfg.UseATRTolerance = false
+	cfg.MinPoleMovePct = 0.5
+	cfg.MaxPoleBars = 10
+	cfg.MinPoleExtPct = 0.2
+	cfg.MinFlagBars = 3
+	cfg.MaxFlagBars = 15
+	cfg.MaxFlagRetrace = 0.7
+	cfg.MaxFlagSpeedRatio = 1.0
+	cfg.MinSMACatchUp = 0.33
+	cfg.SlopeBars = 3
+	cfg.MinSlopePct = 0.01
+	cfg.MaxSetupsPerCross = 1
 	cfg.CooldownMin = 15
-	band := 0.05
-	t0 := msTime(1_700_000_000_000)
+	return cfg
+}
 
-	// A qualifying LONG kiss (low <= fast+band, close >= fast) stamped at bar time at.
-	longTouch := func(at time.Time) barCtx {
-		b := bar(100.02, 100.06, 99.97, 100.01)
-		b.BucketStart = at
-		return ctx(100, 90, 100, 90, band, b)
-	}
-	// A bar closing clear above the band, which re-arms the setup for the next bar.
-	reArm := func(at time.Time) barCtx {
-		b := bar(100.2, 100.3, 100.1, 100.2)
-		b.BucketStart = at
-		return ctx(100, 90, 100, 90, band, b)
-	}
+// step is one scripted bar: its OHLC plus the 21/200 SMA readings on that bar.
+type step struct {
+	fast, slow float64
+	b          Bar
+}
 
-	m, sent := testMachine(t, cfg)
-	m.regime, m.armed, m.reArmed, m.poleRing = regimeLong, true, true, []float64{1} // pole satisfied
+// script drives decide() with explicit SMA readings, one minute per bar, carrying
+// each bar's SMAs into the next as prevFast/prevSlow exactly like processBar does.
+type script struct {
+	m    *machine
+	sent []string
+	n    int
+}
 
-	m.decide(longTouch(t0))
-	if len(*sent) != 1 {
-		t.Fatalf("first LONG touch should fire, alerts=%d", len(*sent))
-	}
+func newScript(cfg Config) *script {
+	s := &script{}
+	s.m = newMachine(cfg, newIndicators(cfg), func(msg string) { s.sent = append(s.sent, msg) })
+	return s
+}
 
-	// Re-armed and kissing again 6 minutes later: inside the cooldown => silent, and
-	// the setup must NOT be consumed by the alert that was never sent.
-	m.decide(reArm(t0.Add(5 * time.Minute)))
-	m.decide(longTouch(t0.Add(6 * time.Minute)))
-	if len(*sent) != 1 {
-		t.Fatalf("second LONG touch inside the cooldown must be silent, alerts=%d", len(*sent))
-	}
-	if !m.reArmed || !m.armed {
-		t.Fatalf("cooled-down touch must leave the setup armed: armed=%v reArmed=%v", m.armed, m.reArmed)
-	}
-
-	// 15 minutes after the alert the window has passed => the next kiss fires.
-	m.decide(longTouch(t0.Add(15 * time.Minute)))
-	if len(*sent) != 2 {
-		t.Fatalf("LONG touch after the cooldown should fire, alerts=%d", len(*sent))
-	}
-
-	// Independent timers: a LONG alert one minute ago does not silence a SHORT retest.
-	ms, sentS := testMachine(t, cfg)
-	ms.regime, ms.armed, ms.reArmed, ms.poleRing = regimeShort, true, true, []float64{1}
-	ms.lastFire[regimeLong] = t0
-	sb := bar(99.98, 100.03, 99.94, 99.99) // high >= fast-band, close <= fast
-	sb.BucketStart = t0.Add(time.Minute)
-	ms.decide(ctx(100, 110, 100, 110, band, sb))
-	if len(*sentS) != 1 {
-		t.Fatalf("SHORT touch must not be blocked by the LONG cooldown, alerts=%d", len(*sentS))
+func (s *script) feed(steps ...step) {
+	for _, st := range steps {
+		st.b.BucketStart = testT0.Add(time.Duration(s.n) * time.Minute)
+		s.n++
+		s.m.decide(barCtx{
+			fast: st.fast, slow: st.slow,
+			prevFast: s.m.prevFast, prevSlow: s.m.prevSlow, havePrev: s.m.havePrev,
+			band: s.m.cfg.TouchTolPct / 100 * st.fast,
+			bar:  st.b,
+		})
+		s.m.prevFast, s.m.prevSlow, s.m.havePrev = st.fast, st.slow, true
 	}
 }
 
-func msTime(ms int64) time.Time { return time.UnixMilli(ms).UTC() }
+// crossLong is a golden cross with price sitting just above both SMAs.
+func crossLong() []step {
+	return []step{
+		{98.9, 99, bar(99.5, 99.6, 99.4, 99.5)},  // 21 below 200
+		{99.1, 99, bar(99.5, 99.6, 99.4, 99.55)}, // golden cross
+	}
+}
+
+// poleLong launches a 0.9% leg from the 99.4 origin to a 100.3 extreme, 0.9% above the 21.
+func poleLong() []step {
+	return []step{
+		{99.2, 99, bar(99.55, 99.8, 99.5, 99.75)},   // leg starts (0.40% — not a pole yet)
+		{99.3, 99, bar(99.75, 100.0, 99.7, 99.95)},  // 0.60% leg, 0.70% above the 21: pole
+		{99.4, 99, bar(99.95, 100.3, 99.9, 100.25)}, // new extreme: pole extends
+	}
+}
+
+// flagLong drifts sideways-down while the rising 21 catches up, touching it on the
+// fourth bar with a close back above: the model entry.
+func flagLong() []step {
+	return []step{
+		{99.55, 99, bar(100.25, 100.28, 100.15, 100.2)},
+		{99.7, 99, bar(100.2, 100.25, 100.05, 100.1)},
+		{99.85, 99, bar(100.1, 100.15, 99.98, 100.05)},
+		{100.0, 99, bar(100.05, 100.1, 100.02, 100.06)}, // kisses the 21, support holds
+	}
+}
+
+func modelLong() []step {
+	return concat(crossLong(), poleLong(), flagLong())
+}
+
+func concat(parts ...[]step) []step {
+	var out []step
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// mirror reflects a scenario around price 100, turning a long setup into the
+// equivalent short one (a death cross, a pole down, a flag up into a falling 21).
+func mirror(steps []step) []step {
+	out := make([]step, len(steps))
+	for i, s := range steps {
+		out[i] = step{200 - s.fast, 200 - s.slow, bar(200-s.b.Open, 200-s.b.Low, 200-s.b.High, 200-s.b.Close)}
+	}
+	return out
+}
+
+// The full cross → pole → flag → touch sequence fires exactly once, on the touch bar,
+// for longs and (mirrored) shorts.
+func TestModelEntryFires(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []step
+	}{
+		{"LONG", modelLong()},
+		{"SHORT", mirror(modelLong())},
+	} {
+		s := newScript(testConfig())
+		s.feed(tc.steps[:len(tc.steps)-1]...)
+		if len(s.sent) != 0 {
+			t.Fatalf("%s: nothing may fire before the touch, got %v", tc.name, s.sent)
+		}
+		if s.m.pole == nil {
+			t.Fatalf("%s: a flagpole should be tracked while the flag forms", tc.name)
+		}
+		s.feed(tc.steps[len(tc.steps)-1])
+		if len(s.sent) != 1 || !strings.Contains(s.sent[0], "SMA RETEST — "+tc.name) {
+			t.Fatalf("%s: the touch should fire one %s alert, got %v", tc.name, tc.name, s.sent)
+		}
+	}
+}
+
+// Price hugging a rising 21 after the cross never stretches away from it, so there is
+// no pole and no touch alerts — however often it kisses the line.
+func TestNoPoleNoAlert(t *testing.T) {
+	s := newScript(testConfig())
+	s.feed(crossLong()...)
+	for i := 0; i < 20; i++ {
+		f := 99.2 + 0.05*float64(i)
+		s.feed(step{f, 99, bar(f+0.05, f+0.1, f+0.01, f+0.05)})
+	}
+	if len(s.sent) != 0 || s.m.pole != nil {
+		t.Fatalf("price riding the 21 is not a pole: alerts=%d pole=%v", len(s.sent), s.m.pole)
+	}
+}
+
+// A leg that covers the distance too slowly (outside MaxPoleBars) is a drift, not a
+// flagpole, even when price is well away from the 21.
+func TestSlowDriftIsNoPole(t *testing.T) {
+	s := newScript(testConfig())
+	s.feed(crossLong()...)
+	for i := 0; i < 30; i++ {
+		p := 99.6 + 0.025*float64(i)
+		s.feed(step{p - 0.35, 99, bar(p, p+0.02, p-0.01, p+0.02)})
+		if s.m.pole != nil {
+			t.Fatalf("bar %d: a 0.025%%/bar drift must not qualify as a pole", i)
+		}
+	}
+}
+
+// Touching the 21 straight after the pole is a snap back with no flag: no alert, and
+// the pole is consumed so a later touch in the same drift cannot use it.
+func TestSnapBackIsNoFlag(t *testing.T) {
+	s := newScript(testConfig())
+	s.feed(concat(crossLong(), poleLong())...)
+	s.feed(step{99.9, 99, bar(100.25, 100.28, 99.92, 99.95)}) // touches the 21 one bar after the extreme
+	if s.m.pole != nil {
+		t.Fatalf("a snap back to the 21 must consume the pole")
+	}
+	s.feed(
+		step{99.95, 99, bar(99.95, 100.1, 99.98, 100.05)},
+		step{100.0, 99, bar(100.05, 100.25, 100.1, 100.2)},
+		step{100.1, 99, bar(100.2, 100.22, 100.12, 100.15)}, // kisses the 21 again
+	)
+	if len(s.sent) != 0 {
+		t.Fatalf("no flag formed, so no alert may fire, got %v", s.sent)
+	}
+}
+
+// When the gap closes because price falls onto a sluggish 21 (a V) rather than the 21
+// catching up to a sideways flag, the touch does not alert.
+func TestPriceFallingOntoThe21IsNoFlag(t *testing.T) {
+	s := newScript(testConfig())
+	s.feed(concat(crossLong(), poleLong()[:2])...)
+	s.feed(
+		step{99.8, 99, bar(99.95, 100.3, 99.9, 100.25)}, // extreme, 0.5 above the 21
+		step{99.82, 99, bar(100.25, 100.28, 100.1, 100.15)},
+		step{99.84, 99, bar(100.15, 100.2, 100.0, 100.05)},
+		step{99.86, 99, bar(100.05, 100.1, 99.96, 100.0)},
+		step{99.9, 99, bar(100.0, 100.05, 99.92, 99.95)}, // touch: the 21 closed only 20% of the gap
+	)
+	if len(s.sent) != 0 || s.m.pole != nil {
+		t.Fatalf("a V onto the 21 must not alert and must consume the pole: alerts=%d", len(s.sent))
+	}
+}
+
+// The 21 SMA must still be curving in the trend direction at the touch: a 21 that has
+// gone flat rejects an otherwise textbook flag.
+func TestFlatSMARejected(t *testing.T) {
+	s := newScript(testConfig())
+	s.feed(concat(crossLong(), poleLong())...)
+	s.feed(
+		step{99.6, 99, bar(100.25, 100.28, 100.2, 100.22)},
+		step{99.8, 99, bar(100.22, 100.25, 100.15, 100.18)},
+		step{100.0, 99, bar(100.18, 100.2, 100.1, 100.12)},
+		step{100.0, 99, bar(100.12, 100.15, 100.08, 100.1)},
+		step{100.0, 99, bar(100.1, 100.12, 100.06, 100.08)},
+		step{100.0, 99, bar(100.08, 100.1, 100.02, 100.05)}, // touch with a flat 21
+	)
+	if len(s.sent) != 0 {
+		t.Fatalf("a flat 21 SMA must not alert, got %v", s.sent)
+	}
+
+	// The same flag into a 21 that is still rising fires.
+	s2 := newScript(testConfig())
+	s2.feed(modelLong()...)
+	if len(s2.sent) != 1 {
+		t.Fatalf("a rising 21 should fire, got %d", len(s2.sent))
+	}
+}
+
+// A flag bar that touches the 21 but closes through it breaks the flag; a later clean
+// touch has no pole left to complete.
+func TestFlagClosingThroughThe21Breaks(t *testing.T) {
+	s := newScript(testConfig())
+	steps := modelLong()
+	s.feed(steps[:len(steps)-1]...)
+	s.feed(step{100.0, 99, bar(100.05, 100.1, 99.9, 99.95)})    // closes below the 21
+	s.feed(step{100.05, 99, bar(99.95, 100.1, 100.04, 100.08)}) // clean kiss afterwards
+	if len(s.sent) != 0 {
+		t.Fatalf("a flag that closed through the 21 must not alert, got %v", s.sent)
+	}
+}
+
+// A flag that never reaches the 21 within MaxFlagBars goes stale and is dropped.
+func TestStaleFlagDropped(t *testing.T) {
+	cfg := testConfig()
+	s := newScript(cfg)
+	s.feed(concat(crossLong(), poleLong())...)
+	for i := 0; i < cfg.MaxFlagBars; i++ {
+		s.feed(step{99.5, 99, bar(100.2, 100.25, 100.15, 100.2)})
+	}
+	if s.m.pole != nil {
+		t.Fatalf("a flag with no touch after %d bars must be dropped", cfg.MaxFlagBars)
+	}
+	s.feed(step{100.1, 99, bar(100.2, 100.22, 100.12, 100.15)})
+	if len(s.sent) != 0 {
+		t.Fatalf("a stale flag must not alert, got %v", s.sent)
+	}
+}
+
+// A pullback that reaches the 200 SMA disarms the regime (silently unless
+// EmitInvalidation is on).
+func TestInvalidation(t *testing.T) {
+	for _, emit := range []bool{false, true} {
+		cfg := testConfig()
+		cfg.EmitInvalidation = emit
+		s := newScript(cfg)
+		s.feed(concat(crossLong(), poleLong()[:2])...)
+		s.feed(step{99.4, 99, bar(99.5, 99.6, 98.95, 99.1)}) // low reaches the 200 SMA
+		if s.m.armed || s.m.pole != nil {
+			t.Fatalf("emit=%t: reaching the 200 SMA must disarm", emit)
+		}
+		want := 0
+		if emit {
+			want = 1
+		}
+		if len(s.sent) != want {
+			t.Fatalf("emit=%t: want %d invalidation notes, got %v", emit, want, s.sent)
+		}
+	}
+}
+
+// secondSetupLong is a fresh pole and flag right after modelLong's entry, five
+// minutes after it.
+func secondSetupLong() []step {
+	return []step{
+		{100.1, 99, bar(100.06, 100.3, 100.05, 100.25)},
+		{100.2, 99, bar(100.25, 100.6, 100.2, 100.55)}, // new pole
+		{100.3, 99, bar(100.55, 100.58, 100.45, 100.5)},
+		{100.4, 99, bar(100.5, 100.52, 100.48, 100.5)},
+		{100.45, 99, bar(100.47, 100.5, 100.46, 100.48)}, // kisses the 21
+	}
+}
+
+// MaxSetupsPerCross keeps it to the first setup after a cross; the cooldown silences a
+// second setup in the same direction inside CooldownMin, and neither gate touches the
+// other direction.
+func TestSetupLimits(t *testing.T) {
+	// Default: one setup per cross.
+	s := newScript(testConfig())
+	s.feed(concat(modelLong(), secondSetupLong())...)
+	if len(s.sent) != 1 {
+		t.Fatalf("MaxSetupsPerCross=1 should allow exactly one alert, got %d", len(s.sent))
+	}
+
+	// Unlimited setups, no cooldown: the second pole + flag fires too.
+	cfg := testConfig()
+	cfg.MaxSetupsPerCross, cfg.CooldownMin = 0, 0
+	s2 := newScript(cfg)
+	s2.feed(concat(modelLong(), secondSetupLong())...)
+	if len(s2.sent) != 2 {
+		t.Fatalf("with no limits the second setup should fire, got %d", len(s2.sent))
+	}
+
+	// Unlimited setups, 15m cooldown: the second setup five minutes later is silent.
+	cfg.CooldownMin = 15
+	s3 := newScript(cfg)
+	s3.feed(concat(modelLong(), secondSetupLong())...)
+	if len(s3.sent) != 1 {
+		t.Fatalf("a second LONG setup inside the cooldown must be silent, got %d", len(s3.sent))
+	}
+
+	// A LONG alert a minute ago does not cool down a SHORT setup.
+	s4 := newScript(testConfig())
+	s4.m.lastFire[regimeLong] = testT0.Add(-time.Minute)
+	s4.feed(mirror(modelLong())...)
+	if len(s4.sent) != 1 {
+		t.Fatalf("the SHORT setup must not be blocked by the LONG cooldown, got %d", len(s4.sent))
+	}
+}
+
+// Silent replay rebuilds the state without sending: a flag still forming at the end
+// of history alerts on the first live touch, and a setup that completed during the
+// replay is used up rather than re-alerted.
+func TestSilentReplay(t *testing.T) {
+	steps := modelLong()
+
+	s := newScript(testConfig())
+	s.m.silent = true
+	s.feed(steps[:len(steps)-1]...)
+	s.m.silent = false
+	s.feed(steps[len(steps)-1])
+	if len(s.sent) != 1 {
+		t.Fatalf("a flag replayed from history should alert on the live touch, got %d", len(s.sent))
+	}
+
+	s2 := newScript(testConfig())
+	s2.m.silent = true
+	s2.feed(steps...)
+	s2.m.silent = false
+	if len(s2.sent) != 0 {
+		t.Fatalf("replay must be silent, got %v", s2.sent)
+	}
+	if s2.m.armed || s2.m.lastFire[regimeLong].IsZero() {
+		t.Fatalf("a setup completed in history must be used up: armed=%t lastFire=%v", s2.m.armed, s2.m.lastFire)
+	}
+}
+
+// replayHistory runs real bars through processBar: it arms only when it observes a
+// cross, and never sends.
+func TestReplayHistoryNeedsObservedCross(t *testing.T) {
+	cfg := testConfig()
+	cfg.FastPeriod, cfg.SlowPeriod, cfg.WarmBootBars = 2, 4, 20
+	history := func(closes ...float64) []Bar {
+		out := make([]Bar, len(closes))
+		for i, c := range closes {
+			out[i] = Bar{BucketStart: testT0.Add(time.Duration(i) * time.Minute), Open: c, High: c, Low: c, Close: c}
+		}
+		return out
+	}
+
+	var sent []string
+	m := newMachine(cfg, newIndicators(cfg), func(s string) { sent = append(sent, s) })
+	replayHistory(m, history(10, 9, 8, 7, 6, 7, 9, 11)) // falls, then crosses up
+	if m.regime != regimeLong || !m.armed || m.silent || len(sent) != 0 {
+		t.Fatalf("observed golden cross: regime=%d armed=%t silent=%t sent=%d", m.regime, m.armed, m.silent, len(sent))
+	}
+
+	m2 := newMachine(cfg, newIndicators(cfg), func(s string) { sent = append(sent, s) })
+	replayHistory(m2, history(1, 2, 3, 4, 5, 6, 7, 8)) // uptrend throughout, no cross
+	if m2.regime != regimeNone || m2.armed {
+		t.Fatalf("no observed cross must stay unarmed: regime=%d armed=%t", m2.regime, m2.armed)
+	}
+}
