@@ -135,8 +135,8 @@ func TestModelEntryFires(t *testing.T) {
 			t.Fatalf("%s: a flagpole should be tracked while the flag forms", tc.name)
 		}
 		s.feed(tc.steps[len(tc.steps)-1])
-		if len(s.sent) != 1 || !strings.Contains(s.sent[0], "SMA RETEST — "+tc.name) {
-			t.Fatalf("%s: the touch should fire one %s alert, got %v", tc.name, tc.name, s.sent)
+		if len(s.sent) != 1 || !strings.Contains(s.sent[0], "SMA RETEST — FROM ") {
+			t.Fatalf("%s: the touch should fire one alert, got %v", tc.name, s.sent)
 		}
 	}
 }

@@ -12,6 +12,7 @@ Join the public Telegram channel to instantly receive:
 - Real-time combined OKX & Bybit liquidation alerts
 - Clear visual breakdowns of Long vs. Short liquidations
 - Market funding rates & Open Interest metrics
+- A 07:00 (Amsterdam) morning briefing of the day's market-moving macro events
 
 🔗 **[Join the official MarktPanda Channel](https://t.me/marktpanda)**
 
@@ -62,6 +63,8 @@ A pullback all the way to the **200 SMA** invalidates the setup.
    - the **21 SMA caught up to price** — it closed ≥ `MinSMACatchUp` of the gap that stood between it and the pole's extreme. This is what separates a flag (price goes sideways, the 21 comes to it) from a V (price falls straight back onto the 21);
    - the pullback ran no faster than `MaxFlagSpeedRatio` × the pole's speed;
    - the **21 SMA is still curving in the trend direction** — up for a long, down for a short — by ≥ `MinSlopePct` over `SlopeBars` bars.
+
+   The alert describes the pattern (which side price tested the 21 SMA from, and the stats) — it does **not** say "long", "short" or "entry". What you do with it is your call.
 
    Either way that first touch consumes the pole: another alert needs a fresh pole and flag.
 5. **Invalidation.** If a pullback reaches the 200 SMA, the setup is disarmed until the next cross. (An optional note can be emitted when this happens.)
@@ -119,11 +122,56 @@ Each level can alert only once: any candle that trades through it spends it, swe
 
 > Bearish sweeps mirror this (🔴, swept highs, shorts liquidated, invalidated above). Level names, prices and the liquidation split are bold in Telegram. The values above are illustrative.
 
+## 🗓 Morning Macro Calendar (Independent Module)
+
+A fourth, fully self-contained module (`internal/calendar`) posts a **daily briefing at 07:00 Amsterdam time** (DST-aware) of the economic events that tend to move the Bitcoin price in the next 24 hours. It reads the public [Forex Factory](https://www.forexfactory.com/calendar) weekly calendar feed once a day and shares nothing with the other alerts.
+
+Every event gets an **impact score from 1 to 5** for the BTC volatility it usually brings. BTC trades like a US-liquidity asset, so the score starts from Forex Factory's own impact rating and weights US releases — above all inflation, jobs and the Fed — well above the rest:
+
+| Score | Events |
+|---|---|
+| 🔴 **5** | US tier-1: Fed rate decision / statement / press conference / projections, CPI, core PCE, non-farm payrolls (not ADP), the Fed Chair speaking |
+| 🟠 **4** | Any other high-impact US release, or US PPI, GDP, retail sales, ISM, JOLTS, jobless claims, unemployment rate, FOMC minutes, ADP |
+| 🟡 **3** | Medium-impact US releases; rate decisions by the ECB, BoJ, BoE or PBoC |
+| ⚪ **2** | Other high-impact non-US releases; a US bank holiday (thin liquidity) |
+| ⚪ **1** | Everything else — hidden by default |
+
+Events are listed in time order, two lines each: the time and event name, then the score with the forecast and previous values. On a day without relevant events it sends nothing. The score describes **expected volatility only — never a direction or a trade**.
+
+```markdown
+🗓 MACRO CALENDAR — Wed 30 Sep
+Next 24h · times in CEST
+
+⚡ Biggest: 5/5 at 14:30 — Core PCE Price Index m/m
+
+14:15 🇺🇸 ADP Non-Farm Employment Change
+🟠 4/5 · fcst 73K · prev 38K
+
+14:30 🇺🇸 Core PCE Price Index m/m
+🔴 5/5 · fcst 0.3% · prev 0.2%
+
+14:30 🇺🇸 Final GDP q/q
+🟠 4/5 · fcst 1.5% · prev 1.5%
+
+21:30 🇺🇸 President Trump Speaks
+🟡 3/5
+
+Thu 00:00 🇺🇸 FOMC Member Kashkari Speaks
+🟡 3/5
+
+ℹ️ Score 1–5 = expected BTC volatility.
+```
+
+> Times are bold in Telegram. The feed only covers the current week (Sunday–Saturday, New York time), so the Saturday briefing cannot see events early on Sunday — in practice there almost never are any. The feed rate-limits aggressively, so the module fetches once per day and retries up to 3 times, 2 minutes apart; if it still fails, that day's briefing is skipped and logged (`[CALENDAR]`). A restart after 07:00 waits for the next morning, so it never double-posts.
+
+**Tweak or remove it.** Everything is a field in `calendar.Config` (`internal/calendar/config.go`): timezone and send time, the look-ahead window, and the minimum score shown (`MinScore`). The scoring keyword lists live in `internal/calendar/score.go`. To remove it, delete the single `calendar.Run(...)` call in `main.go` and the `internal/calendar` folder.
+
 ## ✨ Key Features
 
 - **Zero Alert Fatigue:** 5-minute rolling windows and configurable volume confluence filters ensure you only get notified during major volatility blocks.
 - **Directional Context Label:** Each alert is labelled from combined Open Interest flow — *reversal up* (capitulation), *continuation*, or *unclear* — as plain context on the raw event, not a scored buy/sell signal.
 - **21/200 SMA Retest Module:** A fully independent add-on that watches 1-minute candles for bar-close retests of the 21 SMA after a 21/200 cross (both long and short), with a 200-SMA invalidation guard, anti-spam debounce, per-signal forward-return outcome logging, and a WebSocket-primary / REST-fallback candle feed.
+- **Morning Macro Calendar:** A daily 07:00 (Amsterdam) Telegram briefing of the next 24 hours of BTC-relevant economic events from Forex Factory, each scored 1–5 for expected volatility.
 - **Liquidity Sweep Module:** A fully independent add-on that alerts on strict 5-minute stop runs through 1h swing, previous-day and previous-week levels — big rejection wick, heavy volume and live Bybit + OKX liquidations on the swept side — with per-alert outcome logging and a log-only switch.
 - **Stateful Context Engine:** Doesn't just report the crash; it reports the context. Real-time Open Interest shifts ($\Delta$) and Funding Rates are attached to every alert to help identify Short Squeezes, long-squeezes, and trap setups.
 - **Smartwatch Optimized:** Alerts are meticulously formatted using minimalist layouts, specific bold markers, and clean line breaks, allowing you to read Volume, Range, Funding, and OI delta at a single glance on your wrist.
@@ -162,19 +210,18 @@ Each level can alert only once: any candle that trades through it spends it, swe
 The independent SMA retest module sends its own message, with a distinct `📐` prefix so it stays readable in the same feed:
 
 ```markdown
-📐 SMA RETEST — LONG (1m)
+📐 SMA RETEST — FROM ABOVE (1m)
 BTC/USDT  @ 63704.40
 21 SMA: 63702.10   |   200 SMA: 63180.50
-Touch low: 63689.20
-Room to 200 SMA: 0.82%
-Flagpole: 0.95% in 8 bars (0.41% above the 21)
+Distance to 200 SMA: 0.82%
+Flagpole: 0.95% in 8 bars (0.41% from the 21)
 Flag: 9 bars, gave back 38% of the pole; the 21 closed 52% of the gap
-21 SMA rising: 0.085% over 5 bars
-Regime: 34 bars since golden cross
-Cross + flagpole + flag + kiss of the rising 21 SMA (support held) — model entry.
+21 SMA slope: 0.085% over 5 bars
+Regime: 34 bars since the 21/200 cross
+Price tested the 21 SMA without closing through it.
 ```
 
-> Short setups mirror this (death cross, `Touch high`, a falling 21, "resistance held"). The values above are illustrative.
+> The values above are illustrative. The header says whether price tested the 21 SMA `FROM ABOVE` or `FROM BELOW`, so it reads at a glance on a smartwatch; the message deliberately contains no long/short call, entry wording or disclaimer.
 
 ## 🚀 Setup & Configuration
 
@@ -224,6 +271,7 @@ All tunable behavior lives in one place per feature — no engine restructuring 
 
 - **Liquidation alert thresholds** — tunable constants at the top of `internal/aggregator/engine.go`: the dynamic per-venue volume bar (floor, volume-baseline fraction, volatility multiplier cap) and the OI-flow label bands (`MinOIContinuationFraction`, `MinOIReversalFraction`, `StrongOISignalFraction`) that decide reversal / continuation / unclear.
 - **SMA Retest module** (`internal/smaretest` config block): timeframe (`1m` by default) and SMA periods, the 21-SMA touch tolerance (percent band or ATR-based), the flagpole (`MinPoleMovePct`, `MaxPoleBars`, `MinPoleExtPct`), the flag (`MinFlagBars`, `MaxFlagBars`, `MaxFlagRetrace`, `MaxFlagSpeedRatio`, `MinSMACatchUp`), the 21 SMA slope (`SlopeBars`, `MinSlopePct`), direction filter (both/long/short), setups per cross (`MaxSetupsPerCross`; 1 by default, `0` unlimited) and the per-direction alert cooldown (`CooldownMin`; 15 minutes, `0` disables), the forward-return horizons for outcome logging (`OutcomeHorizonsMin`), and warm-boot depth.
+- **Morning Macro Calendar** (`internal/calendar` config block): `Timezone`, `SendHour` / `SendMinute` (07:00 Amsterdam), `WindowHours` (24), `MinScore` (2), and the feed URL / retry settings; the scoring keywords are in `score.go`.
 - **Liquidity Sweep module** (`internal/sweep` config block): level sources and merging (`SwingStrength`, `EqualLevelTolPct`, `MaxLevelAgeHours`), the sweep candle (`MinPenetrationATR`, `MaxPenetrationATR`, `MinWickRatio`, `MinWickATR`, `MinVolumeRatio`, `VolumeLookback`), the liquidation confirmation (`RequireLiquidations`, `MinLiqUSD`, `MinLiqSideShare`, `LiqGraceSec`), `CooldownMin`, `LogOnly`, and the outcome horizons (`OutcomeHorizonsMin`).
 
 Adjust these before running `task build`. Treat the shipped defaults as starting points and validate against real events before trading on them.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/robmeijerink/MarktPandaBot/internal/aggregator"
 	"github.com/robmeijerink/MarktPandaBot/internal/bybit"
+	"github.com/robmeijerink/MarktPandaBot/internal/calendar"
 	"github.com/robmeijerink/MarktPandaBot/internal/okx"
 	"github.com/robmeijerink/MarktPandaBot/internal/smaretest"
 	"github.com/robmeijerink/MarktPandaBot/internal/sweep"
@@ -60,6 +61,13 @@ func main() {
 	// Bybit/OKX streams and messages. Remove it by deleting this call; mute it without
 	// removing by setting LogOnly in its Config; tune every rule in that same Config.
 	go sweep.Run(sweep.DefaultConfig(), func(msg string) {
+		telegram.DispatchTelegramAlert(telegramToken, chatID, msg)
+	})
+
+	// Morning macro calendar (internal/calendar) — independent add-on: a 07:00
+	// Amsterdam briefing of the day's BTC-relevant economic events, scored 1–5.
+	// Remove it by deleting this call; tune it in its Config.
+	go calendar.Run(calendar.DefaultConfig(), func(msg string) {
 		telegram.DispatchTelegramAlert(telegramToken, chatID, msg)
 	})
 
